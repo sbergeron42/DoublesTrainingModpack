@@ -109,6 +109,8 @@ pub struct MenuJsonStruct {
 pub enum FighterId {
     Player = 0,
     CPU = 1,
+    CPU2 = 2,
+    CPU3 = 3,
 }
 
 pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {

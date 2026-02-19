@@ -24,6 +24,7 @@ use training_mod_sync::*;
 pub mod buff;
 pub mod charge;
 pub mod clatter;
+pub mod doubles;
 pub mod combo;
 pub mod crouch;
 pub mod directional_influence;
@@ -140,6 +141,10 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             input_record::handle_recording();
             frame_counter::tick_ingame();
             tech::hide_tech();
+
+            // Assign each CPU its own hit-team so CPU hitboxes register on other CPUs.
+            // See training/doubles.rs for the full explanation.
+            doubles::set_cpu_hit_team(module_accessor);
         }
 
         combo::once_per_frame(module_accessor);
