@@ -1143,3 +1143,143 @@ byteflags! {
 }
 
 impl_submenutrait!(InputDisplay);
+
+// ---------------------------------------------------------------------------
+// Doubles: CPU control-scheme profile selector
+// ---------------------------------------------------------------------------
+
+// Control-scheme profile selector for a single CPU slot.
+//
+// Presented as a ToggleSingle in the TUI — the user cycles through
+// "Default" (no override) and "Profile 1" … "Profile 8", each matching
+// the same position in the Options → Controls profile list.
+//
+// `selected_index()` returns 0 for Default, 1..=8 for an actual profile
+// (1-indexed to match what the game shows in the controls menu).
+byteflags! {
+    pub struct CpuProfile {
+        pub DEFAULT   = "Default",
+        pub PROFILE_1 = "Profile 1",
+        pub PROFILE_2 = "Profile 2",
+        pub PROFILE_3 = "Profile 3",
+        pub PROFILE_4 = "Profile 4",
+        pub PROFILE_5 = "Profile 5",
+        pub PROFILE_6 = "Profile 6",
+        pub PROFILE_7 = "Profile 7",
+        pub PROFILE_8 = "Profile 8",
+    }
+}
+
+impl_submenutrait!(CpuProfile);
+
+impl CpuProfile {
+    /// Returns the 1-indexed profile entry to apply.
+    /// 0 means "Default" (no override); 1..=8 means use that profile slot.
+    pub fn selected_index(&self) -> usize {
+        if self.PROFILE_1 > 0 {
+            1
+        } else if self.PROFILE_2 > 0 {
+            2
+        } else if self.PROFILE_3 > 0 {
+            3
+        } else if self.PROFILE_4 > 0 {
+            4
+        } else if self.PROFILE_5 > 0 {
+            5
+        } else if self.PROFILE_6 > 0 {
+            6
+        } else if self.PROFILE_7 > 0 {
+            7
+        } else if self.PROFILE_8 > 0 {
+            8
+        } else {
+            0 // DEFAULT or nothing selected → no override
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CpuKind — character (fighter_kind) override for CPU2/CPU3 in doubles mode
+// ---------------------------------------------------------------------------
+//
+// Only values confirmed via GDB watchpoint sessions are listed here.
+// Add more after verifying in-game.
+//
+// `selected_fighter_kind()` returns None for None/Default (mirror CPU1),
+// or Some(i32) with the raw fighter_kind value to substitute.
+byteflags! {
+    pub struct CpuKind {
+        pub NONE      = "None (Mirror CPU 1)",
+        pub MARIO     = "Mario",
+        pub DK        = "Donkey Kong",
+        pub LINK      = "Link",
+        pub SAMUS     = "Samus",
+        pub YOSHI     = "Yoshi",
+        pub KIRBY     = "Kirby",
+        pub LUIGI     = "Luigi",
+        pub NESS      = "Ness",
+        pub CAPTAIN   = "Captain Falcon",
+        pub GANONDORF = "Ganondorf",
+        pub JOKER     = "Joker",
+        pub SORA      = "Sora",
+    }
+}
+
+impl_submenutrait!(CpuKind);
+
+impl CpuKind {
+    /// Returns the raw fighter_kind i32 for the selected character,
+    /// or None if set to NONE (vanilla clone behaviour).
+    pub fn selected_fighter_kind(&self) -> Option<i32> {
+        if self.MARIO > 0     { return Some(0); }
+        if self.DK > 0        { return Some(1); }
+        if self.LINK > 0      { return Some(2); }
+        if self.SAMUS > 0     { return Some(3); }
+        if self.YOSHI > 0     { return Some(5); }
+        if self.KIRBY > 0     { return Some(6); }
+        if self.LUIGI > 0     { return Some(9); }
+        if self.NESS > 0      { return Some(10); }
+        if self.CAPTAIN > 0   { return Some(11); }
+        if self.GANONDORF > 0 { return Some(24); }
+        if self.JOKER > 0     { return Some(82); }
+        if self.SORA > 0      { return Some(85); }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TeammateSlot — which CPU slot is controlled by a human (P2) in doubles mode
+// ---------------------------------------------------------------------------
+//
+// When a slot is selected the modpack automatically:
+//   1. Writes CPU Behavior = Control to the vanilla pause menu so P2's
+//      physical controller drives that CPU fighter.
+//   2. Overrides `is_operation_cpu` so every OTHER CPU slot still receives
+//      modpack AI (mash, DI, tech, etc.).
+//
+// `selected_index()` returns 0 for None, 1 for CPU_1, 2 for CPU_2, 3 for CPU_3.
+byteflags! {
+    pub struct TeammateSlot {
+        pub NONE  = "None",
+        pub CPU_1 = "CPU 1",
+        pub CPU_2 = "CPU 2",
+        pub CPU_3 = "CPU 3",
+    }
+}
+
+impl_submenutrait!(TeammateSlot);
+
+impl TeammateSlot {
+    /// Returns 0 (None) or 1..=3 (CPU entry ID of the human-controlled slot).
+    pub fn selected_index(&self) -> usize {
+        if self.CPU_1 > 0 {
+            1
+        } else if self.CPU_2 > 0 {
+            2
+        } else if self.CPU_3 > 0 {
+            3
+        } else {
+            0
+        }
+    }
+}

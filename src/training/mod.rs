@@ -147,6 +147,12 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             doubles::set_cpu_hit_team(module_accessor);
         }
 
+        // Phase 4 diagnostic: log CPU2 boma address and fighter_kind once per
+        // unique boma pointer.  Fires again after each respawn so GDB has the
+        // current address for placing a write watchpoint on fighter_kind.
+        // Remove once the fighter_kind write site is identified.
+        doubles::log_phase4(module_accessor);
+
         combo::once_per_frame(module_accessor);
         hitbox_visualizer::get_command_flag_cat(module_accessor);
         save_states::save_states(module_accessor);
@@ -800,17 +806,81 @@ pub unsafe fn handle_article_get_int(
 #[skyline::hook(offset = *OFFSET_FIM)]
 unsafe fn handle_final_input_mapping(
     mappings: *mut ControllerMapping,
-    player_idx: i32, // Is this the player index, or plugged in controller index? Need to check, assuming player for now - is this 0 indexed or 1?
+    // Semantics TBD: assumed to be fighter-slot index (0=P1, 1=CPU1, 2=CPU2,
+    // 3=CPU3).  Verify by enabling the debug log block below and checking the
+    // output for each connected controller.
+    player_idx: i32,
     out: *mut MappedInputs,
     controller_struct: &mut SomeControllerStruct,
     arg: bool,
 ) {
     // Order of hooks here REALLY matters. Tread lightly
 
-    // Go through the original mapping function first
+    // --- DEBUG: uncomment to verify player_idx semantics at runtime ---
+    // if is_training_mode() {
+    //     info!("FIM: player_idx={}", player_idx);
+    // }
+
+    // For CPU controller slots (player_idx > 0), temporarily replace the
+    // ControllerMapping with the user-selected profile before the game
+    // translates raw inputs, then restore it so game state isn't permanently
+    // mutated.  Confirmed via diagnostic: in "CPU Behavior = Control" mode,
+    // player_idx=1 corresponds to npad=1 (the second physical controller).
+    // Save and restore the player-indexed slot (mappings is an array of
+    // ControllerMapping entries; FIM reads from mappings + player_idx * 0x50).
+    let saved_mapping = if player_idx > 0 && is_training_mode() {
+        let slot = mappings.add(player_idx as usize);
+        let saved = *slot;
+        doubles::apply_cpu_control_scheme(mappings, player_idx as usize);
+        Some((slot, saved))
+    } else {
+        None
+    };
+
+    // Go through the original mapping function
     original!()(mappings, player_idx, out, controller_struct, arg);
+
+    // Restore mappings to avoid permanent mutation of game state
+    if let Some((slot, saved)) = saved_mapping {
+        *slot = saved;
+    }
+
     if !is_training_mode() {
         return;
+    }
+
+    // --- Doubles diagnostics & profile announcements ---
+    // log_fim_call records each unique (player_idx, npad_number) combo once,
+    // both to the SD card file and as an on-screen toast.  This confirms the
+    // actual player_idx → physical controller mapping for your setup.
+    doubles::log_fim_call(
+        player_idx,
+        controller_struct.controller.npad_number,
+        controller_struct.controller.is_connected,
+    );
+
+    // Announce CPU profile changes and enforce teammate CPU Behavior via player_idx == 0.
+    if player_idx == 0 {
+        doubles::check_and_announce_profiles();
+        doubles::enforce_cpu_behavior_for_teammate();
+        doubles::update_cpu_kind_cache();
+    }
+
+    // Post-process out->buttons to enforce the tap-jump and button mapping
+    // from the selected profile.  Both must run after original!() and after
+    // the mapping restore so the flags reflect what original FIM produced.
+    if player_idx > 0 {
+        doubles::apply_tap_jump_override(
+            out,
+            player_idx as usize,
+            controller_struct.controller.style,
+        );
+        doubles::apply_button_remap_override(
+            out,
+            player_idx as usize,
+            controller_struct.controller.style,
+            controller_struct.controller.current_buttons,
+        );
     }
 
     // Check if we should apply hot reload configs
@@ -836,6 +906,7 @@ unsafe fn handle_final_input_mapping(
     // MUTATES controller state to apply recording or playback
     input_record::handle_final_input_mapping(player_idx, out);
 }
+
 
 pub fn training_mods() {
     info!("Applying training mods.");
@@ -941,7 +1012,20 @@ pub fn training_mods() {
         handle_fighter_effect,
         handle_fighter_joint_effect,
         // L+R+A Reset
-        lra_handle
+        lra_handle,
+        // Doubles: CSS 4-slot expansion for training mode
+        doubles::css_setup_hook,
+        // Doubles: CSS panel layout fix (position P3/P4 panels)
+        doubles::css_panel_layout_hook,
+        // Doubles: capture fighter_kind from CSS confirm for P3/P4
+        doubles::css_confirm_hook,
+        // Doubles: override cloned fighter_kind for entries 2/3 with CSS picks
+        doubles::create_fighter_entry_hook,
+        // Doubles: safety hooks for Lua AI init (skip for unloaded characters)
+        doubles::lua_ai_path_hook,
+        doubles::lua_ai_init_hook,
+        // Doubles: fix cloned character hash for entries 2/3 during CSS→training transition
+        doubles::clone_write_hook
     );
 
     items::init();

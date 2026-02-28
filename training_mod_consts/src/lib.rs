@@ -27,6 +27,9 @@ pub struct TrainingModpackMenu {
     pub character_item: CharacterItem,
     pub clatter_strength: ClatterFrequency,
     pub crouch: OnOff,
+    pub cpu1_profile: CpuProfile,
+    pub cpu2_profile: CpuProfile,
+    pub cpu3_profile: CpuProfile,
     pub di_state: Direction,
     pub falling_aerials: BoolFlag,
     pub fast_fall_delay: Delay,
@@ -95,6 +98,9 @@ pub struct TrainingModpackMenu {
     pub tech_hide: OnOff,
     pub update_policy: UpdatePolicy,
     pub lra_reset: OnOff,
+    pub teammate_slot: TeammateSlot,
+    pub cpu2_kind: CpuKind,
+    pub cpu3_kind: CpuKind,
 }
 
 #[repr(C)]
@@ -121,6 +127,9 @@ pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {
     character_item: CharacterItem::NONE,
     clatter_strength: ClatterFrequency::NONE,
     crouch: OnOff::OFF,
+    cpu1_profile: CpuProfile::DEFAULT,
+    cpu2_profile: CpuProfile::DEFAULT,
+    cpu3_profile: CpuProfile::DEFAULT,
     di_state: Direction::empty(),
     falling_aerials: BoolFlag::FALSE,
     fast_fall_delay: Delay::empty(),
@@ -205,6 +214,9 @@ pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {
     tech_hide: OnOff::OFF,
     update_policy: UpdatePolicy::default(),
     lra_reset: OnOff::ON,
+    teammate_slot: TeammateSlot::NONE,
+    cpu2_kind: CpuKind::NONE,
+    cpu3_kind: CpuKind::NONE,
 };
 
 pub static DEFAULTS_MENU: RwLock<TrainingModpackMenu> = RwLock::new(BASE_MENU);
@@ -796,6 +808,61 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         submenus: StatefulTable::with_items(NX_SUBMENU_ROWS, NX_SUBMENU_COLUMNS, misc_tab_submenus),
     };
     overall_menu.tabs.push(misc_tab);
+
+    // Doubles Tab
+    let mut doubles_tab_submenus: Vec<SubMenu> = Vec::new();
+    doubles_tab_submenus.push(TeammateSlot::to_submenu(
+        "Teammate Slot",
+        "teammate_slot",
+        "Which CPU slot is controlled by Player 2 in doubles mode.\nWhen set, the modpack automatically enables CPU Behavior = Control for that slot and keeps modpack AI active on all other CPU slots.",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(CpuProfile::to_submenu(
+        "CPU 1 Profile",
+        "cpu1_profile",
+        "Control scheme for CPU slot 1 (first CPU fighter).\nSelect a profile from Options \u{2192} Controls, or leave at Default for no override.\nA notification will show the profile name when it takes effect.",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(CpuProfile::to_submenu(
+        "CPU 2 Profile",
+        "cpu2_profile",
+        "Control scheme for CPU slot 2 (second CPU fighter, if present).\nSelect a profile from Options \u{2192} Controls, or leave at Default for no override.\nA notification will show the profile name when it takes effect.",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(CpuProfile::to_submenu(
+        "CPU 3 Profile",
+        "cpu3_profile",
+        "Control scheme for CPU slot 3 (third CPU fighter, if present).\nSelect a profile from Options \u{2192} Controls, or leave at Default for no override.\nA notification will show the profile name when it takes effect.",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(CpuKind::to_submenu(
+        "CPU 2 Character",
+        "cpu2_kind",
+        "Character for CPU slot 2. Takes effect when training mode is next loaded.\nNone = mirror CPU 1 (vanilla behaviour).",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(CpuKind::to_submenu(
+        "CPU 3 Character",
+        "cpu3_kind",
+        "Character for CPU slot 3. Takes effect when training mode is next loaded.\nNone = mirror CPU 1 (vanilla behaviour).",
+        ToggleSingle,
+        false,
+    ));
+    let doubles_tab = Tab {
+        id: "doubles",
+        title: "Doubles Settings",
+        submenus: StatefulTable::with_items(
+            NX_SUBMENU_ROWS,
+            NX_SUBMENU_COLUMNS,
+            doubles_tab_submenus,
+        ),
+    };
+    overall_menu.tabs.push(doubles_tab);
 
     // Ensure that a tab is always selected
     if overall_menu.tabs.get_selected().is_none() {

@@ -468,7 +468,6 @@ unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
     }
 
     let controller_data = *p_data.add(1) as *mut ControlModuleInternal;
-    let _controller_no = (*controller_data).controller_index;
 
     // Check if we need to begin playback this frame due to a mash toggle
     // TODO: Setup STARTING_STATUS based on current playback slot here
