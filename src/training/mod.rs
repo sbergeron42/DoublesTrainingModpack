@@ -131,6 +131,10 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             menu::spawn_menu();
         }
 
+        // Assign each fighter its own hit-team so all hitboxes interact in doubles.
+        // Must run for ALL fighters (including teammate/P2), not just CPUs.
+        doubles::set_cpu_hit_team(module_accessor);
+
         if is_operation_cpu(module_accessor) {
             // Handle dodge staling here b/c input recording or mash can cause dodging
             WorkModule::set_flag(
@@ -141,17 +145,8 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             input_record::handle_recording();
             frame_counter::tick_ingame();
             tech::hide_tech();
-
-            // Assign each CPU its own hit-team so CPU hitboxes register on other CPUs.
-            // See training/doubles.rs for the full explanation.
-            doubles::set_cpu_hit_team(module_accessor);
         }
 
-        // Phase 4 diagnostic: log CPU2 boma address and fighter_kind once per
-        // unique boma pointer.  Fires again after each respawn so GDB has the
-        // current address for placing a write watchpoint on fighter_kind.
-        // Remove once the fighter_kind write site is identified.
-        doubles::log_phase4(module_accessor);
 
         combo::once_per_frame(module_accessor);
         hitbox_visualizer::get_command_flag_cat(module_accessor);
@@ -767,17 +762,12 @@ pub unsafe fn handle_reused_ui(
     }
 
     if save_states::is_loading() {
-        let player_module_accessor = &mut *try_get_module_accessor(FighterId::Player)
-            .expect("Could not get player module accessor in reused_ui");
-        let cpu_module_accessor = &mut *try_get_module_accessor(FighterId::CPU)
-            .expect("Could not get CPU module accessor in reused_ui");
-        let player_fighter_kind = utility::get_kind(player_module_accessor);
-        let cpu_fighter_kind = utility::get_kind(cpu_module_accessor);
         // If Little Mac is in the game and we're buffing him, set the meter to 100
-        if (player_fighter_kind == *FIGHTER_KIND_LITTLEMAC
-            || cpu_fighter_kind == *FIGHTER_KIND_LITTLEMAC)
-            && read(&MENU).buff_state.contains(&BuffOption::KO)
-        {
+        let has_littlemac = [FighterId::Player, FighterId::CPU, FighterId::CPU2, FighterId::CPU3]
+            .iter()
+            .filter_map(|id| try_get_module_accessor(*id))
+            .any(|ma| utility::get_kind(&mut *ma) == *FIGHTER_KIND_LITTLEMAC);
+        if has_littlemac && read(&MENU).buff_state.contains(&BuffOption::KO) {
             param_2 = 100;
         }
     }
@@ -822,65 +812,16 @@ unsafe fn handle_final_input_mapping(
     // }
 
     // For CPU controller slots (player_idx > 0), temporarily replace the
-    // ControllerMapping with the user-selected profile before the game
-    // translates raw inputs, then restore it so game state isn't permanently
-    // mutated.  Confirmed via diagnostic: in "CPU Behavior = Control" mode,
-    // player_idx=1 corresponds to npad=1 (the second physical controller).
-    // Save and restore the player-indexed slot (mappings is an array of
-    // ControllerMapping entries; FIM reads from mappings + player_idx * 0x50).
-    let saved_mapping = if player_idx > 0 && is_training_mode() {
-        let slot = mappings.add(player_idx as usize);
-        let saved = *slot;
-        doubles::apply_cpu_control_scheme(mappings, player_idx as usize);
-        Some((slot, saved))
-    } else {
-        None
-    };
-
     // Go through the original mapping function
     original!()(mappings, player_idx, out, controller_struct, arg);
-
-    // Restore mappings to avoid permanent mutation of game state
-    if let Some((slot, saved)) = saved_mapping {
-        *slot = saved;
-    }
 
     if !is_training_mode() {
         return;
     }
 
-    // --- Doubles diagnostics & profile announcements ---
-    // log_fim_call records each unique (player_idx, npad_number) combo once,
-    // both to the SD card file and as an on-screen toast.  This confirms the
-    // actual player_idx → physical controller mapping for your setup.
-    doubles::log_fim_call(
-        player_idx,
-        controller_struct.controller.npad_number,
-        controller_struct.controller.is_connected,
-    );
-
-    // Announce CPU profile changes and enforce teammate CPU Behavior via player_idx == 0.
+    // Enforce teammate CPU Behavior via player_idx == 0.
     if player_idx == 0 {
-        doubles::check_and_announce_profiles();
         doubles::enforce_cpu_behavior_for_teammate();
-        doubles::update_cpu_kind_cache();
-    }
-
-    // Post-process out->buttons to enforce the tap-jump and button mapping
-    // from the selected profile.  Both must run after original!() and after
-    // the mapping restore so the flags reflect what original FIM produced.
-    if player_idx > 0 {
-        doubles::apply_tap_jump_override(
-            out,
-            player_idx as usize,
-            controller_struct.controller.style,
-        );
-        doubles::apply_button_remap_override(
-            out,
-            player_idx as usize,
-            controller_struct.controller.style,
-            controller_struct.controller.current_buttons,
-        );
     }
 
     // Check if we should apply hot reload configs

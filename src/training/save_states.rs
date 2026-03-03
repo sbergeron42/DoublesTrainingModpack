@@ -8,7 +8,6 @@ use smash::cpp::l2c_value::LuaConst;
 use smash::hash40;
 use smash::lib::lua_const::*;
 use smash::phx::{Hash40, Vector3f};
-use std::ptr;
 use training_mod_consts::{CharacterItem, SaveDamage, SaveStateSlot};
 
 use SaveState::*;
@@ -16,7 +15,6 @@ use SaveState::*;
 use crate::common::button_config;
 use crate::common::consts::get_random_float;
 use crate::common::consts::get_random_int;
-use crate::common::consts::FighterId;
 use crate::common::consts::OnOff;
 use crate::common::consts::PlaybackSlot;
 use crate::common::consts::RecordTrigger;
@@ -24,7 +22,6 @@ use crate::common::consts::SaveStateMirroring;
 //TODO: Cleanup above
 use crate::common::consts::SAVE_STATES_TOML_PATH;
 use crate::common::is_dead;
-use crate::common::try_get_module_accessor;
 use crate::common::MENU;
 use crate::is_operation_cpu;
 use crate::training::buff;
@@ -139,6 +136,8 @@ macro_rules! default_save_state {
 pub struct SaveStateSlots {
     player: [SavedState; NUM_SAVE_STATE_SLOTS],
     cpu: [SavedState; NUM_SAVE_STATE_SLOTS],
+    cpu2: [SavedState; NUM_SAVE_STATE_SLOTS],
+    cpu3: [SavedState; NUM_SAVE_STATE_SLOTS],
 }
 
 const NUM_SAVE_STATE_SLOTS: usize = 5;
@@ -154,6 +153,8 @@ pub fn load_from_file() -> SaveStateSlots {
     let defaults = SaveStateSlots {
         player: [default_save_state!(); NUM_SAVE_STATE_SLOTS],
         cpu: [default_save_state!(); NUM_SAVE_STATE_SLOTS],
+        cpu2: [default_save_state!(); NUM_SAVE_STATE_SLOTS],
+        cpu3: [default_save_state!(); NUM_SAVE_STATE_SLOTS],
     };
 
     info!("Checking for previous save state settings in {SAVE_STATES_TOML_PATH}...");
@@ -187,18 +188,34 @@ unsafe fn save_state_cpu(slot: usize) -> &'static mut SavedState {
     &mut (*SAVE_STATE_SLOTS.data_ptr()).cpu[slot]
 }
 
+unsafe fn save_state_cpu2(slot: usize) -> &'static mut SavedState {
+    &mut (*SAVE_STATE_SLOTS.data_ptr()).cpu2[slot]
+}
+
+unsafe fn save_state_cpu3(slot: usize) -> &'static mut SavedState {
+    &mut (*SAVE_STATE_SLOTS.data_ptr()).cpu3[slot]
+}
+
+unsafe fn save_state_for_entry(entry_id: i32, slot: usize) -> &'static mut SavedState {
+    match entry_id {
+        0 => save_state_player(slot),
+        1 => save_state_cpu(slot),
+        2 => save_state_cpu2(slot),
+        3 => save_state_cpu3(slot),
+        _ => save_state_player(slot),
+    }
+}
+
 pub unsafe fn get_state_pokemon(
     ptrainer_module_accessor: *mut app::BattleObjectModuleAccessor,
 ) -> u32 {
     let selected_slot = get_slot();
     let pokemon_module_accessor = ptrainer::get_pokemon_module_accessor(ptrainer_module_accessor);
-    let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
-        .expect("Could not get CPU module accessor in get_state_pokemon");
-    let fighter_kind = if !ptr::eq(pokemon_module_accessor, cpu_module_accessor) {
-        save_state_player(selected_slot).fighter_kind
-    } else {
-        save_state_cpu(selected_slot).fighter_kind
-    };
+    let entry_id = WorkModule::get_int(
+        &mut *pokemon_module_accessor,
+        *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID,
+    );
+    let fighter_kind = save_state_for_entry(entry_id, selected_slot).fighter_kind;
     (fighter_kind - *FIGHTER_KIND_PZENIGAME) as u32
 }
 
@@ -206,24 +223,20 @@ pub unsafe fn get_charge_state(
     module_accessor: *mut app::BattleObjectModuleAccessor,
 ) -> ChargeState {
     let selected_slot = get_slot();
-    let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
-        .expect("Could not get CPU module accessor in get_charge_state");
-    if !ptr::eq(module_accessor, cpu_module_accessor) {
-        save_state_player(selected_slot).charge
-    } else {
-        save_state_cpu(selected_slot).charge
-    }
+    let entry_id = WorkModule::get_int(
+        &mut *module_accessor,
+        *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID,
+    );
+    save_state_for_entry(entry_id, selected_slot).charge
 }
 
 pub unsafe fn end_copy_ability(module_accessor: *mut app::BattleObjectModuleAccessor) {
     let selected_slot = get_slot();
-    let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
-        .expect("Could not get CPU module accessor in end_copy_ability");
-    let save_state = if !ptr::eq(module_accessor, cpu_module_accessor) {
-        save_state_player(selected_slot)
-    } else {
-        save_state_cpu(selected_slot)
-    };
+    let entry_id = WorkModule::get_int(
+        &mut *module_accessor,
+        *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID,
+    );
+    let save_state = save_state_for_entry(entry_id, selected_slot);
     if save_state.state == WaitForCopyAbility {
         save_state.state = NoAction;
     }
@@ -245,17 +258,17 @@ unsafe fn get_slot() -> usize {
 }
 
 pub unsafe fn is_killing() -> bool {
-    let selected_slot = get_slot();
-    (save_state_player(selected_slot).state == KillPlayer
-        || save_state_player(selected_slot).state == WaitForAlive)
-        || (save_state_cpu(selected_slot).state == KillPlayer
-            || save_state_cpu(selected_slot).state == WaitForAlive)
+    let s = get_slot();
+    [save_state_player(s), save_state_cpu(s), save_state_cpu2(s), save_state_cpu3(s)]
+        .iter()
+        .any(|ss| ss.state == KillPlayer || ss.state == WaitForAlive)
 }
 
 pub unsafe fn is_loading() -> bool {
-    let selected_slot = get_slot();
-    save_state_player(selected_slot).state != NoAction
-        || save_state_cpu(selected_slot).state != NoAction
+    let s = get_slot();
+    [save_state_player(s), save_state_cpu(s), save_state_cpu2(s), save_state_cpu3(s)]
+        .iter()
+        .any(|ss| ss.state != NoAction)
 }
 
 pub unsafe fn should_mirror() -> f32 {
@@ -426,13 +439,9 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
 
     let selected_slot = get_slot();
     let status = StatusModule::status_kind(module_accessor);
-    let is_cpu = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID)
-        == FighterId::CPU as i32;
-    let save_state = if is_cpu {
-        save_state_cpu(selected_slot)
-    } else {
-        save_state_player(selected_slot)
-    };
+    let entry_id = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+    let is_cpu = entry_id != 0;
+    let save_state = save_state_for_entry(entry_id, selected_slot);
 
     let fighter_kind = app::utility::get_kind(module_accessor);
     let fighter_is_ptrainer = is_ptrainer(module_accessor);
@@ -471,6 +480,8 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
 
             save_state_player(slot).state = KillPlayer;
             save_state_cpu(slot).state = KillPlayer;
+            save_state_cpu2(slot).state = KillPlayer;
+            save_state_cpu3(slot).state = KillPlayer;
         }
         MIRROR_STATE = should_mirror();
         // end input recording playback
@@ -637,8 +648,8 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
                 steve::load_steve_state(module_accessor, load_steve);
             }
             // Play Training Reset SFX, since silence is eerie
-            // Only play for the CPU so we don't have 2 overlapping
-            if is_cpu {
+            // Only play for entry 1 so we don't have overlapping sounds
+            if entry_id == 1 {
                 SoundModule::play_se_no3d(
                     module_accessor,
                     Hash40::new("se_system_position_reset"),
@@ -713,8 +724,11 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
     if button_config::combo_passes(button_config::ButtonCombo::SaveState) {
         // Don't begin saving state if Nana's delayed input is captured
         MIRROR_STATE = 1.0;
-        save_state_player(read(&MENU).save_state_slot.into_idx().unwrap_or(0)).state = Save;
-        save_state_cpu(read(&MENU).save_state_slot.into_idx().unwrap_or(0)).state = Save;
+        let save_slot = read(&MENU).save_state_slot.into_idx().unwrap_or(0);
+        save_state_player(save_slot).state = Save;
+        save_state_cpu(save_slot).state = Save;
+        save_state_cpu2(save_slot).state = Save;
+        save_state_cpu3(save_slot).state = Save;
         notifications::clear_notification("Save State");
         notifications::notification(
             "Save State".to_string(),
@@ -761,9 +775,11 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
             0,
         );
 
-        // If both chars finished saving by now
+        // If all fighters finished saving by now
         if save_state_player(selected_slot).state != Save
             && save_state_cpu(selected_slot).state != Save
+            && save_state_cpu2(selected_slot).state != Save
+            && save_state_cpu3(selected_slot).state != Save
         {
             std::thread::spawn(move || save_to_file());
         }
