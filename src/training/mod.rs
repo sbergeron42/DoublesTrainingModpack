@@ -127,6 +127,9 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
     }
 
     unsafe {
+        // Track module_accessor addresses per entry for diagnostic cross-referencing.
+        doubles::track_boma_address(module_accessor);
+
         if menu::menu_condition() {
             menu::spawn_menu();
         }
@@ -815,13 +818,157 @@ unsafe fn handle_final_input_mapping(
     // Go through the original mapping function
     original!()(mappings, player_idx, out, controller_struct, arg);
 
+    // Track hardware npad for each player_idx. Runs even outside training
+    // mode (including CSS) so the mapping is ready for clone_write.
+    let npad = controller_struct.controller.npad_number;
+    doubles::track_fim_npad(player_idx, npad);
+
+    // Save Controller pointer for this npad (persists across CSS → training).
+    // Controllers are NOT contiguous — we must save each one individually.
+    let ctrl_addr = controller_struct.controller as *const _ as usize;
+    doubles::save_controller_for_npad(npad, ctrl_addr);
+    // Also save by player_idx so we can find non-P1 controllers even when
+    // we don't know their exact npad (panel offset for npad is unreliable).
+    doubles::save_controller_for_player_idx(player_idx, ctrl_addr);
+
+    // Save ControllerMapping indexed by npad (hardware controller ID).
+    // This ensures the profile follows the physical controller regardless of
+    // which player_idx slot it occupies during CSS vs training.
+    doubles::save_ctrl_mapping(npad, mappings.add(player_idx as usize));
+
     if !is_training_mode() {
         return;
     }
 
-    // Enforce teammate CPU Behavior via player_idx == 0.
+    // Capture the game's normal FIM output for human entries at player_idx > 0.
+    // The game fires FIM for these entries when config[0x78]=0 (human). This
+    // happens AFTER our FIM extra calls (player_idx=0 block below) in the frame,
+    // so it naturally overwrites stale/wrong data with correct controller input.
+    if player_idx > 0 && player_idx <= 3 {
+        doubles::capture_native_fim_output(
+            player_idx,
+            &*out,
+            controller_struct.controller as *const _ as usize,
+        );
+    }
+
+    // Reset the set_cpu_controls call counter once per frame (player_idx 0 = P1,
+    // which always fires first). Also capture controller input for human entries
+    // by calling FIM's original with their saved Controller pointer.
     if player_idx == 0 {
-        doubles::enforce_cpu_behavior_for_teammate();
+        doubles::reset_cpu_controls_counter();
+        doubles::clear_human_mapped_inputs();
+
+        // For each human entry (1-3), look up the saved Controller for their npad
+        // and call FIM's original to produce properly-mapped MappedInputs.
+        for entry_id in 1i32..=3 {
+            if !doubles::is_human_entry(entry_id) {
+                continue;
+            }
+            let entry_npad = doubles::get_human_entry_npad(entry_id);
+            if entry_npad < 0 {
+                continue;
+            }
+
+            let mut ctrl_addr = doubles::get_controller_for_npad(entry_npad);
+            if ctrl_addr == 0 {
+                // Fallback: panel npad might be wrong. Search for any
+                // non-P1 Controller that FIM has seen.
+                ctrl_addr = doubles::find_non_p1_controller();
+                if ctrl_addr == 0 {
+                    continue;
+                }
+                // Self-correct the entry's npad to the Controller's actual npad
+                // so subsequent frames use the direct lookup path.
+                let real_npad = unsafe {
+                    (*(ctrl_addr as *const Controller)).npad_number
+                };
+                doubles::set_human_entry_npad(entry_id, real_npad as i32);
+                use core::sync::atomic::{AtomicUsize, Ordering as AO};
+                static FALLBACK_LOG: AtomicUsize = AtomicUsize::new(0);
+                if FALLBACK_LOG.fetch_add(1, AO::Relaxed) < 5 {
+                    doubles::debug_log(&format!(
+                        "FIM_extra: entry={} npad={} FALLBACK ctrl={:#x} real_npad={}",
+                        entry_id, entry_npad, ctrl_addr, real_npad
+                    ));
+                }
+            }
+
+            // Build a fake SomeControllerStruct with the saved Controller pointer.
+            // SomeControllerStruct layout: [u8; 0x10] padding + &'static mut Controller.
+            #[repr(C)]
+            struct FakeCtrlStruct {
+                padding: [u8; 0x10],
+                controller_ptr: usize, // raw pointer stored as usize
+            }
+            let mut fake = FakeCtrlStruct {
+                padding: [0u8; 0x10],
+                controller_ptr: ctrl_addr,
+            };
+
+            let mut extra_out = MappedInputs::empty();
+
+            // Call the ORIGINAL (un-hooked) FIM to get properly mapped input.
+            // Do NOT modify mappings[] before calling — that can corrupt game
+            // state and cause AI input bleed when P1 is in hitstop.
+            original!()(
+                mappings,
+                entry_id,
+                &mut extra_out,
+                &mut *(&mut fake as *mut FakeCtrlStruct as *mut SomeControllerStruct),
+                arg,
+            );
+
+            // Strip phantom FLICK_JUMP (0x8000) — FIM's tap-jump flick detection
+            // uses per-player_idx internal state that's stale for entries that don't
+            // normally get FIM calls in training mode, producing a phantom
+            // FLICK_JUMP every frame even with no physical stick input.
+            // Only strip when lstick_y is small (no real upward flick); preserve
+            // for genuine tap-jump input.
+            if extra_out.buttons.contains(Buttons::FLICK_JUMP) && extra_out.lstick_y < 56 {
+                extra_out.buttons &= !Buttons::FLICK_JUMP;
+            }
+
+            // Apply profile button remapping using the REAL profile from game
+            // memory (via tag index saved during clone_write). This replaces
+            // FIM's default button mapping with the player's actual profile.
+            let tag = doubles::get_entry_tag(entry_id);
+            let real_profile = doubles::get_profile_mapping(tag);
+
+            // Diagnostic: log FIM extra call details periodically (~every 2 sec)
+            {
+                use core::sync::atomic::{AtomicU32, Ordering as AO};
+                static EXTRA_DIAG_CTR: AtomicU32 = AtomicU32::new(0);
+                let ctr = EXTRA_DIAG_CTR.fetch_add(1, AO::Relaxed);
+                if ctr < 10 || ctr % 120 == 0 {
+                    let has_profile = real_profile.is_some();
+                    let before_btns = extra_out.buttons.bits();
+                    let raw_btns = unsafe {
+                        (*(ctrl_addr as *const Controller)).current_buttons
+                    };
+                    doubles::debug_log(&format!(
+                        "FIM_EXTRA_DIAG: entry={} tag={} has_profile={} fim_btns={:#x} raw_a={} raw_b={} raw_x={} raw_y={} lstick=({},{}) native_capture_will_overwrite={}",
+                        entry_id, tag, has_profile, before_btns,
+                        raw_btns.a(), raw_btns.b(), raw_btns.x(), raw_btns.y(),
+                        extra_out.lstick_x, extra_out.lstick_y,
+                        // If FIM also fires natively for this entry (config[0x78]=0),
+                        // capture_native_fim_output will overwrite this data later.
+                        true, // human entries get native FIM calls
+                    ));
+                }
+            }
+
+            if let Some(ref profile) = real_profile {
+                doubles::apply_profile_button_remap(
+                    &mut extra_out,
+                    ctrl_addr as *const Controller,
+                    profile as *const ControllerMapping,
+                );
+            }
+
+            doubles::save_human_mapped_input(entry_id, &extra_out);
+
+        }
     }
 
     // Check if we should apply hot reload configs
@@ -846,6 +993,7 @@ unsafe fn handle_final_input_mapping(
     // Potentially apply input recording, thus with delay
     // MUTATES controller state to apply recording or playback
     input_record::handle_final_input_mapping(player_idx, out);
+
 }
 
 

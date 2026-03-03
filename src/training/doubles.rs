@@ -8,15 +8,15 @@
 ///   entries 2/3 get their CSS-selected character instead of CPU1's clone.
 /// - Lua AI safety: skips AI init for override characters whose NSS modules
 ///   are not loaded, preventing null-pointer crashes.
-/// - Teammate slot: auto-enables "CPU Behavior = Control" for a configured
-///   teammate slot so P2's controller routes to that CPU fighter.
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+/// - Clone-write also sets human/CPU status and controller bindings from CSS,
+///   so CPU Behavior doesn't need to be forced.
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use smash::app::{lua_bind::*, BattleObjectModuleAccessor};
 use smash::lib::lua_const::*;
 use training_mod_sync::*;
 
-use crate::common::{FIGHTER_MANAGER_ADDR, MENU, TRAINING_MENU_ADDR};
+use crate::common::{FIGHTER_MANAGER_ADDR, MENU};
 
 // ---------------------------------------------------------------------------
 // SD card debug log
@@ -25,17 +25,25 @@ use crate::common::{FIGHTER_MANAGER_ADDR, MENU, TRAINING_MENU_ADDR};
 const DOUBLES_DEBUG_LOG: &str = "sd:/ultimate/TrainingModpack/doubles_debug.log";
 
 /// Appends `msg` with a timestamp to the persistent debug file on the SD card.
+/// On the first call each session, the file is truncated (overwritten) so you
+/// always get a fresh log without manual cleanup.
 /// Errors are silently ignored so this is safe to call from any hook context.
-fn debug_log(msg: &str) {
+pub fn debug_log(msg: &str) {
     use std::io::Write;
     // Monotonic frame counter as lightweight timestamp (no std::time on this platform).
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+    static FIRST_CALL: AtomicBool = AtomicBool::new(true);
     let tick = COUNTER.fetch_add(1, Ordering::Relaxed);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(DOUBLES_DEBUG_LOG)
-    {
+    // First call: truncate. Subsequent calls: append.
+    let truncate = FIRST_CALL.swap(false, Ordering::Relaxed);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true);
+    if truncate {
+        opts.write(true).truncate(true);
+    } else {
+        opts.append(true);
+    }
+    if let Ok(mut f) = opts.open(DOUBLES_DEBUG_LOG) {
         let _ = writeln!(f, "[{:06}] {}", tick, msg);
     }
 }
@@ -59,28 +67,601 @@ pub unsafe fn set_cpu_hit_team(module_accessor: &mut BattleObjectModuleAccessor)
 }
 
 // ---------------------------------------------------------------------------
-// Vanilla CPU Behavior override
+// Human controller input injection
 // ---------------------------------------------------------------------------
+//
+// Training mode forces all non-P1 entries to CPU. For entries designated as
+// human at CSS, we need to inject their hardware controller input.
+//
+// Key discovery: FIM fires for player_idx > 0 in training mode when
+// config[0x78]=0 (human entry). For CPU entries (config[0x78]=1), FIM only
+// fires for player_idx=0. We capture the game's native FIM output for
+// human entries at player_idx > 0 (correct controller, correct profile).
+// As fallback for entries that may not get native FIM calls (e.g. entries
+// 2/3), we also call FIM's original during player_idx=0 with saved
+// Controller pointers from CSS.
+//
+// Approach:
+//   1. During CSS: FIM fires for all player_idx — save Controller ptrs per npad
+//   2. During training FIM (player_idx=0): call FIM original for each human
+//      entry's npad using the saved Controller ptr (fallback)
+//   3. During training FIM (player_idx > 0): if human entry, capture native
+//      FIM output (overwrites fallback with correct data)
+//   4. In set_cpu_controls: for human entries, override AI output with saved
+//      MappedInputs; for CPU entries, let AI output stand
 
-// Game value for "CPU Behavior = Control" (player controls the CPU fighter).
-const CPU_BEHAVIOR_CONTROL: u32 = 8;
+use crate::common::input::{
+    Buttons, ControlModuleInternal, Controller, ControllerMapping, ControllerStyle, InputKind,
+    MappedInputs,
+};
 
-/// When a teammate slot is configured, write CPU Behavior = Control to the
-/// vanilla pause menu every frame so P2's physical controller is routed to that
-/// CPU fighter.  The user does not need to set this manually.
-///
-/// Offset 0xb4c inside PauseMenu = the CPU Behavior u32 field (confirmed via
-/// Ghidra: FUN_7101bbacc0 case 4 writes to `lVar10 + 0xb4c`).
-pub unsafe fn enforce_cpu_behavior_for_teammate() {
-    let teammate = read(&MENU).teammate_slot.selected_index();
-    if teammate == 0 {
-        return; // No teammate configured — leave vanilla setting alone.
+/// Per-frame call counter for set_cpu_controls. Incremented each call,
+/// reset each frame from the FIM hook. The Nth call (1-indexed) corresponds
+/// to entry N (set_cpu_controls fires for entries 1, 2, 3 in order).
+static SET_CPU_CONTROLS_COUNTER: AtomicI32 = AtomicI32::new(0);
+
+/// Called from FIM hook (player_idx==0) once per frame to reset the counter.
+pub fn reset_cpu_controls_counter() {
+    SET_CPU_CONTROLS_COUNTER.store(0, Ordering::Relaxed);
+}
+
+/// Tracks which hardware npad each human entry is assigned to.
+/// Set during clone_write based on CSS panel data. -1 = not human or unassigned.
+static HUMAN_ENTRY_NPAD: [AtomicI32; 4] = [
+    AtomicI32::new(-1), // entry 0 = P1, handled by FIM directly
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+];
+
+/// Returns the assigned npad for a human entry, or -1 if not human/unassigned.
+pub fn get_human_entry_npad(entry_id: i32) -> i32 {
+    if entry_id >= 0 && (entry_id as usize) < HUMAN_ENTRY_NPAD.len() {
+        HUMAN_ENTRY_NPAD[entry_id as usize].load(Ordering::Relaxed)
+    } else {
+        -1
     }
-    if TRAINING_MENU_ADDR.is_null() {
+}
+
+/// Update the npad for a human entry. Used for self-correction when the
+/// fallback Controller lookup discovers the real npad differs from panel data.
+pub fn set_human_entry_npad(entry_id: i32, npad: i32) {
+    if entry_id >= 0 && (entry_id as usize) < HUMAN_ENTRY_NPAD.len() {
+        HUMAN_ENTRY_NPAD[entry_id as usize].store(npad, Ordering::Relaxed);
+    }
+}
+
+/// Tag/profile index per entry, saved during clone_write.
+/// Used to read the real ControllerMapping from game memory for button remapping.
+/// The tag index maps into the profile array: base + tag * 0xf7d8 + 0x24.
+static HUMAN_ENTRY_TAG: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
+
+/// Returns the tag/profile index for a given entry, as saved during clone_write.
+pub fn get_entry_tag(entry_id: i32) -> u32 {
+    if entry_id >= 0 && (entry_id as usize) < HUMAN_ENTRY_TAG.len() {
+        HUMAN_ENTRY_TAG[entry_id as usize].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+/// Read the ControllerMapping from the game's profile memory for a given tag index.
+///
+/// Pointer chain from disassembly of clone_write (13.0.4, offset 0x178845c):
+///   p0 = *(text + 0x5313510)       // global ptr
+///   p1 = *p0                       // profile manager object
+///   flag = *(u8*)p1                // must be 0
+///   p2 = *(p1 + 0x58)             // inner ptr
+///   p3 = *p2                       // array container
+///   array_base = *p3               // actual array base
+///   entry = array_base + tag * 0xf7d8
+///   ControllerMapping at entry + 0x24 (0x50 bytes)
+///
+/// Returns None if any pointer in the chain is null or flag is nonzero.
+pub unsafe fn get_profile_mapping(tag: u32) -> Option<ControllerMapping> {
+    use skyline::hooks::{getRegionAddress, Region};
+    let text_base = getRegionAddress(Region::Text) as usize;
+    let dat_addr = text_base + 0x5313510;
+    let p0 = *(dat_addr as *const usize);
+
+    // One-shot diagnostic: log every pointer in the chain
+    static CHAIN_LOG_DONE: AtomicBool = AtomicBool::new(false);
+    let should_log_chain = !CHAIN_LOG_DONE.swap(true, Ordering::Relaxed);
+
+    if p0 == 0 {
+        if should_log_chain { debug_log("PROFILE_CHAIN FAIL: p0=0"); }
+        return None;
+    }
+    // Extra deref: p1 = *p0 (profile manager object)
+    let p1 = *(p0 as *const usize);
+    if p1 == 0 {
+        if should_log_chain { debug_log(&format!("PROFILE_CHAIN FAIL: p0={:#x} *p0=0", p0)); }
+        return None;
+    }
+    // Flag byte at p1 must be 0 (game skips profile lookup if nonzero)
+    let flag = *(p1 as *const u8);
+    if flag != 0 {
+        if should_log_chain {
+            debug_log(&format!("PROFILE_CHAIN FAIL: flag={} (p0={:#x} p1={:#x})", flag, p0, p1));
+        }
+        return None;
+    }
+    let p2 = *((p1 + 0x58) as *const usize);
+    if p2 == 0 {
+        if should_log_chain { debug_log(&format!("PROFILE_CHAIN FAIL: *(p1+0x58)=0 p1={:#x}", p1)); }
+        return None;
+    }
+    let p3 = *(p2 as *const usize);
+    if p3 == 0 {
+        if should_log_chain { debug_log(&format!("PROFILE_CHAIN FAIL: *p2=0 p2={:#x}", p2)); }
+        return None;
+    }
+    let array_base = *(p3 as *const usize);
+    if array_base == 0 {
+        if should_log_chain { debug_log(&format!("PROFILE_CHAIN FAIL: *p3=0 p3={:#x}", p3)); }
+        return None;
+    }
+
+    if should_log_chain {
+        debug_log(&format!(
+            "PROFILE_CHAIN OK: p0={:#x} p1={:#x} p2={:#x} p3={:#x} base={:#x} tag={} entry={:#x}",
+            p0, p1, p2, p3, array_base, tag,
+            array_base + (tag as usize) * 0xf7d8
+        ));
+    }
+
+    let entry_base = array_base + (tag as usize) * 0xf7d8;
+    let mapping_ptr = (entry_base + 0x24) as *const ControllerMapping;
+    let mapping = core::ptr::read_volatile(mapping_ptr);
+
+    // One-shot diagnostic: log the profile data on first successful read per tag
+    static PROFILE_LOG_DONE: [AtomicBool; 4] = [
+        AtomicBool::new(false), AtomicBool::new(false),
+        AtomicBool::new(false), AtomicBool::new(false),
+    ];
+    let log_slot = (tag as usize) % 4;
+    if !PROFILE_LOG_DONE[log_slot].swap(true, Ordering::Relaxed) {
+        debug_log(&format!(
+            "PROFILE: tag={} gc_a={:?} gc_b={:?} gc_tapjump={} pro_a={:?} pro_b={:?} pro_tapjump={}",
+            tag,
+            mapping.gc_a, mapping.gc_b, mapping.gc_tapjump,
+            mapping.pro_a, mapping.pro_b, mapping.pro_tapjump,
+        ));
+    }
+
+    Some(mapping)
+}
+
+/// Saved Controller pointers per npad (0..7). Captured from FIM hook's
+/// controller_struct.controller during CSS (when FIM fires for all player_idx).
+/// These survive into training mode because Controller objects are persistent.
+static CONTROLLER_PTRS: [AtomicUsize; 8] = [
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+];
+
+/// Called from FIM hook (every call, including CSS) to save the Controller
+/// pointer for a given npad. This builds our npad → Controller mapping.
+pub fn save_controller_for_npad(npad: u32, controller_addr: usize) {
+    if (npad as usize) < CONTROLLER_PTRS.len() {
+        let old = CONTROLLER_PTRS[npad as usize].swap(controller_addr, Ordering::Relaxed);
+        // One-shot diagnostic: log the first time each npad gets a Controller.
+        if old == 0 && controller_addr != 0 {
+            debug_log(&format!(
+                "CTRL_SAVED: npad={} addr={:#x}",
+                npad, controller_addr
+            ));
+        }
+    }
+}
+
+/// Also save Controller by FIM player_idx. This lets us find a Controller
+/// even when we don't know its npad (e.g., P3 during training mode when
+/// the panel npad offset is unreliable).
+static CONTROLLER_BY_PIDX: [AtomicUsize; 8] = [
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+];
+
+/// Save Controller pointer by FIM player_idx.
+pub fn save_controller_for_player_idx(player_idx: i32, controller_addr: usize) {
+    if player_idx >= 0 && (player_idx as usize) < CONTROLLER_BY_PIDX.len() {
+        CONTROLLER_BY_PIDX[player_idx as usize].store(controller_addr, Ordering::Relaxed);
+    }
+}
+
+/// Returns the saved Controller pointer for a given npad, or 0 if not saved.
+pub fn get_controller_for_npad(npad: i32) -> usize {
+    if npad >= 0 && (npad as usize) < CONTROLLER_PTRS.len() {
+        CONTROLLER_PTRS[npad as usize].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+/// Fallback: find any saved Controller that isn't P1's (npad 0).
+/// Used when CONTROLLER_PTRS[entry_npad] is 0, meaning the panel npad
+/// was wrong or FIM never fired for that specific npad.
+pub fn find_non_p1_controller() -> usize {
+    let p1_addr = CONTROLLER_PTRS[0].load(Ordering::Relaxed);
+
+    // First try CONTROLLER_BY_PIDX — CSS player_idx=1 is the second
+    // connected controller, which is P3 in a 2-controller setup.
+    for pidx in 1..CONTROLLER_BY_PIDX.len() {
+        let addr = CONTROLLER_BY_PIDX[pidx].load(Ordering::Relaxed);
+        if addr != 0 && addr != p1_addr {
+            return addr;
+        }
+    }
+
+    // Fallback: search CONTROLLER_PTRS for any non-P1 controller.
+    for npad in 1..CONTROLLER_PTRS.len() {
+        let addr = CONTROLLER_PTRS[npad].load(Ordering::Relaxed);
+        if addr != 0 && addr != p1_addr {
+            return addr;
+        }
+    }
+
+    0
+}
+
+/// Saved ControllerMappings per npad (0..7). Indexed by hardware controller ID
+/// so the mapping follows the physical controller regardless of which player_idx
+/// or entry_id it's associated with. Captured from FIM hook during CSS (and
+/// updated each FIM call) so the profile data is available during training mode.
+static mut SAVED_CTRL_MAPPINGS: [[u8; 0x50]; 8] = [[0u8; 0x50]; 8];
+static SAVED_CTRL_MAPPINGS_VALID: [AtomicBool; 8] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+/// Save a ControllerMapping for a hardware npad from the FIM hook.
+/// Called every FIM call (including CSS) so mappings are captured before
+/// training mode potentially drops them for non-standard entries.
+pub unsafe fn save_ctrl_mapping(npad: u32, mapping: *const ControllerMapping) {
+    if (npad as usize) < 8 && !mapping.is_null() {
+        core::ptr::copy_nonoverlapping(
+            mapping as *const u8,
+            SAVED_CTRL_MAPPINGS[npad as usize].as_mut_ptr(),
+            0x50,
+        );
+        SAVED_CTRL_MAPPINGS_VALID[npad as usize].store(true, Ordering::Relaxed);
+    }
+}
+
+/// Returns a pointer to the saved ControllerMapping for a given npad, or null
+/// if not yet captured. Use the entry's npad (from get_human_entry_npad) to
+/// look up the correct profile.
+pub unsafe fn get_saved_ctrl_mapping(npad: i32) -> *const ControllerMapping {
+    if npad >= 0 && (npad as usize) < 8
+        && SAVED_CTRL_MAPPINGS_VALID[npad as usize].load(Ordering::Relaxed)
+    {
+        SAVED_CTRL_MAPPINGS[npad as usize].as_ptr() as *const ControllerMapping
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// Saved MappedInputs for each human entry, produced by calling FIM's
+/// original function in the FIM hook for each human entry's controller.
+static HUMAN_MAPPED_INPUTS: [RwLock<MappedInputs>; 4] = [
+    RwLock::new(MappedInputs::empty()),
+    RwLock::new(MappedInputs::empty()),
+    RwLock::new(MappedInputs::empty()),
+    RwLock::new(MappedInputs::empty()),
+];
+
+/// Tracks whether save_human_mapped_input was called this frame for each entry.
+/// Distinguishes "player is idle (zero input)" from "FIM extra call didn't fire".
+static HUMAN_INPUT_CAPTURED: [AtomicBool; 4] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+/// Save a human entry's mapped input (called from FIM hook).
+pub fn save_human_mapped_input(entry_id: i32, mapped: &MappedInputs) {
+    if entry_id >= 0 && (entry_id as usize) < HUMAN_MAPPED_INPUTS.len() {
+        assign(&HUMAN_MAPPED_INPUTS[entry_id as usize], *mapped);
+        HUMAN_INPUT_CAPTURED[entry_id as usize].store(true, Ordering::Relaxed);
+    }
+}
+
+/// Clear all saved mapped inputs (called at start of each frame from FIM hook).
+pub fn clear_human_mapped_inputs() {
+    for slot in &HUMAN_MAPPED_INPUTS {
+        assign(slot, MappedInputs::empty());
+    }
+    for flag in &HUMAN_INPUT_CAPTURED {
+        flag.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Called from set_cpu_controls AFTER call_original!.
+/// Uses the per-frame call counter to identify the entry (Nth call = entry N).
+/// For human entries: ALWAYS overrides AI output — injects saved FIM-produced
+/// MappedInputs if captured, or zeros the CMI if not (so AI never autopilots).
+/// For CPU entries: no change (AI output is kept).
+/// Returns true if this is a human entry (caller should skip input_record).
+pub unsafe fn inject_human_input(cmi: *mut ControlModuleInternal) -> bool {
+    let entry_id = SET_CPU_CONTROLS_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if entry_id < 1 || entry_id > 3 {
+        return false;
+    }
+
+    if !is_human_entry(entry_id) {
+        return false;
+    }
+
+    use crate::training::input_record::{STICK_CLAMP_MULTIPLIER, STICK_NEUTRAL};
+
+    if HUMAN_INPUT_CAPTURED[entry_id as usize].load(Ordering::Relaxed) {
+        // FIM captured input this frame — inject it.
+        let mapped = read(&HUMAN_MAPPED_INPUTS[entry_id as usize]);
+
+        // Convert MappedInputs → CMI format (same conversion as input_record playback)
+        (*cmi).buttons = mapped.buttons;
+        (*cmi).stick_x = (mapped.lstick_x as f32) / (i8::MAX as f32);
+        (*cmi).stick_y = (mapped.lstick_y as f32) / (i8::MAX as f32);
+
+        let clamp_x = ((mapped.lstick_x as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+        let clamp_y = ((mapped.lstick_y as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+        (*cmi).clamped_lstick_x = if clamp_x.abs() >= STICK_NEUTRAL { clamp_x } else { 0.0 };
+        (*cmi).clamped_lstick_y = if clamp_y.abs() >= STICK_NEUTRAL { clamp_y } else { 0.0 };
+
+        let rclamp_x = ((mapped.rstick_x as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+        let rclamp_y = ((mapped.rstick_y as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+        (*cmi).clamped_rstick_x = if rclamp_x.abs() >= STICK_NEUTRAL { rclamp_x } else { 0.0 };
+        (*cmi).clamped_rstick_y = if rclamp_y.abs() >= STICK_NEUTRAL { rclamp_y } else { 0.0 };
+    } else {
+        // No FIM capture this frame (e.g. Controller ptr not yet saved during startup).
+        // Zero the CMI so the character stands still instead of AI autopiloting.
+        (*cmi).buttons = Buttons::empty();
+        (*cmi).stick_x = 0.0;
+        (*cmi).stick_y = 0.0;
+        (*cmi).clamped_lstick_x = 0.0;
+        (*cmi).clamped_lstick_y = 0.0;
+        (*cmi).clamped_rstick_x = 0.0;
+        (*cmi).clamped_rstick_y = 0.0;
+    }
+
+    true
+}
+
+/// Capture the game's normal FIM output for human entries at player_idx > 0.
+/// When the game fires FIM for these entries naturally (which happens when
+/// config[0x78]=0, i.e. human), this overwrites any stale data from the
+/// FIM extra calls (which may have used the wrong controller).
+///
+/// Called from the FIM hook right after original!() for player_idx > 0.
+/// FIM's native output already has correct button mapping from internal state
+/// (set up by clone_write via config[0x214]), so we do NOT apply
+/// apply_profile_button_remap here — that would corrupt the correct output.
+pub unsafe fn capture_native_fim_output(
+    player_idx: i32,
+    out: &MappedInputs,
+    _controller_addr: usize,
+) {
+    if player_idx < 1 || player_idx > 3 {
         return;
     }
-    let field = (TRAINING_MENU_ADDR as *mut u8).add(0xb4c) as *mut u32;
-    *field = CPU_BEHAVIOR_CONTROL;
+    if !is_human_entry(player_idx) {
+        return;
+    }
+
+    let mut captured = *out;
+
+    // Strip phantom FLICK_JUMP — same logic as FIM extra calls
+    if captured.buttons.contains(Buttons::FLICK_JUMP) && captured.lstick_y < 56 {
+        captured.buttons &= !Buttons::FLICK_JUMP;
+    }
+
+    // Diagnostic: log native FIM output periodically to compare with FIM extra call
+    {
+        static NATIVE_DIAG_CTR: AtomicU32 = AtomicU32::new(0);
+        let ctr = NATIVE_DIAG_CTR.fetch_add(1, Ordering::Relaxed);
+        if ctr < 10 || ctr % 120 == 0 {
+            debug_log(&format!(
+                "NATIVE_FIM: pidx={} btns={:#x} lstick=({},{})",
+                player_idx, captured.buttons.bits(),
+                captured.lstick_x, captured.lstick_y,
+            ));
+        }
+    }
+
+    save_human_mapped_input(player_idx, &captured);
+}
+
+// ---------------------------------------------------------------------------
+// Profile button remapping for human entries
+// ---------------------------------------------------------------------------
+
+/// Converts an InputKind (from profile ControllerMapping) to the corresponding
+/// Buttons flags. Includes _RAW variants where applicable so the game's
+/// smash-input detection and hold logic work correctly.
+fn input_kind_to_buttons(kind: InputKind) -> Buttons {
+    match kind {
+        InputKind::Attack => Buttons::ATTACK | Buttons::ATTACK_RAW,
+        InputKind::Special => Buttons::SPECIAL | Buttons::SPECIAL_RAW | Buttons::SPECIAL_RAW2,
+        InputKind::Jump => Buttons::JUMP,
+        InputKind::Guard => Buttons::GUARD | Buttons::GUARD_HOLD,
+        InputKind::Grab => Buttons::CATCH,
+        InputKind::SmashAttack => Buttons::SMASH,
+        InputKind::AppealHi => Buttons::APPEAL_HI,
+        InputKind::AppealS => Buttons::APPEAL_SL,
+        InputKind::AppealLw => Buttons::APPEAL_LW,
+        InputKind::Unset => Buttons::empty(),
+    }
+}
+
+/// Applies profile button remapping to FIM extra output for a human entry.
+///
+/// FIM's original produces default-mapped buttons (A→Attack, B→Special, etc.)
+/// regardless of the player's profile. This function reads the raw hardware
+/// button state from the Controller and rebuilds the logical button flags
+/// using the entry's ControllerMapping from their profile.
+///
+/// Stick-derived flags (FLICK_JUMP, CSTICK_ON, JUMP_MINI) are preserved from
+/// FIM's output since they don't depend on button remapping.
+///
+/// Also enforces the profile's tap-jump setting: if disabled, strips FLICK_JUMP.
+pub unsafe fn apply_profile_button_remap(
+    extra_out: &mut MappedInputs,
+    controller: *const Controller,
+    mapping: *const ControllerMapping,
+) {
+    if controller.is_null() || mapping.is_null() {
+        return;
+    }
+
+    let raw = (*controller).current_buttons;
+    let style = (*controller).style;
+    let mapping = &*mapping;
+
+    let mut buttons = Buttons::empty();
+    let tapjump_enabled: bool;
+
+    match style {
+        ControllerStyle::GCController => {
+            if raw.a() { buttons |= input_kind_to_buttons(mapping.gc_a); }
+            if raw.b() { buttons |= input_kind_to_buttons(mapping.gc_b); }
+            if raw.x() { buttons |= input_kind_to_buttons(mapping.gc_x); }
+            if raw.y() { buttons |= input_kind_to_buttons(mapping.gc_y); }
+            if raw.l() || raw.real_digital_l() {
+                buttons |= input_kind_to_buttons(mapping.gc_l);
+            }
+            if raw.r() || raw.real_digital_r() {
+                buttons |= input_kind_to_buttons(mapping.gc_r);
+            }
+            // GC Z button maps to ZR in the raw ButtonBitfield
+            if raw.zl() || raw.zr() {
+                buttons |= input_kind_to_buttons(mapping.gc_z);
+            }
+            if raw.dpad_up() { buttons |= input_kind_to_buttons(mapping.gc_dup); }
+            if raw.dpad_down() { buttons |= input_kind_to_buttons(mapping.gc_ddown); }
+            if raw.dpad_left() || raw.dpad_right() {
+                buttons |= input_kind_to_buttons(mapping.gc_dlr);
+            }
+            tapjump_enabled = mapping.gc_tapjump;
+        }
+        _ => {
+            // Pro Controller, Handheld, Dual Joycon, etc.
+            if raw.a() { buttons |= input_kind_to_buttons(mapping.pro_a); }
+            if raw.b() { buttons |= input_kind_to_buttons(mapping.pro_b); }
+            if raw.x() { buttons |= input_kind_to_buttons(mapping.pro_x); }
+            if raw.y() { buttons |= input_kind_to_buttons(mapping.pro_y); }
+            if raw.l() { buttons |= input_kind_to_buttons(mapping.pro_l); }
+            if raw.r() { buttons |= input_kind_to_buttons(mapping.pro_r); }
+            if raw.zl() { buttons |= input_kind_to_buttons(mapping.pro_zl); }
+            if raw.zr() { buttons |= input_kind_to_buttons(mapping.pro_zr); }
+            if raw.dpad_up() { buttons |= input_kind_to_buttons(mapping.pro_dup); }
+            if raw.dpad_down() { buttons |= input_kind_to_buttons(mapping.pro_ddown); }
+            if raw.dpad_left() || raw.dpad_right() {
+                buttons |= input_kind_to_buttons(mapping.pro_dlr);
+            }
+            tapjump_enabled = mapping.pro_tapjump;
+        }
+    }
+
+    // Strip FLICK_JUMP if profile has tap-jump disabled
+    if !tapjump_enabled {
+        extra_out.buttons &= !Buttons::FLICK_JUMP;
+    }
+
+    // Preserve stick-derived flags from FIM's output (unaffected by button remap)
+    let stick_flags = extra_out.buttons
+        & (Buttons::FLICK_JUMP | Buttons::CSTICK_ON | Buttons::JUMP_MINI | Buttons::STOCK_SHARE);
+
+    extra_out.buttons = buttons | stick_flags;
+}
+
+// ---------------------------------------------------------------------------
+// BOMA address tracking (for diagnostic cross-referencing with p_data)
+// ---------------------------------------------------------------------------
+
+/// Saved BattleObjectModuleAccessor addresses per entry, for diagnostic
+/// cross-referencing against set_cpu_controls p_data values.
+static BOMA_FOR_ENTRY: [AtomicUsize; 4] = [
+    AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0),
+];
+
+/// Called from once_per_frame_per_fighter to save each entry's module_accessor
+/// address. This lets us match p_data values in set_cpu_controls against known
+/// entry addresses.
+pub unsafe fn track_boma_address(module_accessor: &mut BattleObjectModuleAccessor) {
+    let entry_id =
+        WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+    if entry_id >= 0 && (entry_id as usize) < BOMA_FOR_ENTRY.len() {
+        let addr = module_accessor as *mut _ as usize;
+        let old = BOMA_FOR_ENTRY[entry_id as usize].swap(addr, Ordering::Relaxed);
+        // Log once when addresses are first established.
+        if old == 0 {
+            debug_log(&format!(
+                "BOMA: entry={} addr={:#x}",
+                entry_id, addr
+            ));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Human/CPU entry tracking (set during clone_write, read by is_operation_cpu)
+// ---------------------------------------------------------------------------
+
+/// Tracks which entries were assigned as human at CSS.
+/// Index = entry_id (0..3). Set by clone_write_hook, read by input_record's
+/// set_cpu_controls hook to skip AI for human-controlled entries.
+static CSS_ENTRY_IS_HUMAN: [AtomicBool; 4] = [
+    AtomicBool::new(true),  // entry 0 (P1) always human
+    AtomicBool::new(false), // entry 1
+    AtomicBool::new(false), // entry 2
+    AtomicBool::new(false), // entry 3
+];
+
+/// Reverse mapping: hardware npad → entry_id. Allows try_inject_human_input
+/// to find the correct entry from the CMI's controller_index (which is the
+/// hardware npad, not the entry_id). Index = npad (0..7), value = entry_id.
+/// Set in clone_write_hook, -1 = unassigned.
+static NPAD_TO_ENTRY: [AtomicI32; 8] = [
+    AtomicI32::new(0),  // npad 0 → entry 0 (P1, default)
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+];
+
+/// Returns true if the given entry was set as human at CSS.
+pub fn is_human_entry(entry_id: i32) -> bool {
+    if entry_id >= 0 && (entry_id as usize) < CSS_ENTRY_IS_HUMAN.len() {
+        CSS_ENTRY_IS_HUMAN[entry_id as usize].load(Ordering::Relaxed)
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FIM npad tracking (hardware controller → entry mapping)
+// ---------------------------------------------------------------------------
+
+/// Tracks the hardware npad (controller index) that FIM associates with each
+/// player_idx/entry. Updated every FIM call so it's available at clone_write
+/// time. Index = player_idx (0..3), value = npad_number.
+static FIM_NPAD_FOR_ENTRY: [AtomicI32; 4] = [
+    AtomicI32::new(0),
+    AtomicI32::new(-1),
+    AtomicI32::new(-1),
+    AtomicI32::new(-1),
+];
+
+/// Called from the FIM hook (BEFORE the is_training_mode check) to record
+/// which hardware npad is being used for each player_idx. This runs during
+/// CSS too, so the mapping is available when clone_write fires.
+pub fn track_fim_npad(player_idx: i32, npad: u32) {
+    if player_idx >= 0 && (player_idx as usize) < FIM_NPAD_FOR_ENTRY.len() {
+        FIM_NPAD_FOR_ENTRY[player_idx as usize].store(npad as i32, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -717,7 +1298,7 @@ pub unsafe fn lua_ai_init_hook(lua_obj: *mut u8, resource: *mut u8) {
 /// clone_write 4× for entries 0, 1, 2, 3. We override:
 ///   - config[0x88] (ui_chara hash)  — from CSS panel+0x200
 ///   - config[0x78] (player type)    — 0=human, 1=CPU; from CSS panel+0x1F8
-///   - config[0x7C] (npad/controller)— entry_index for human, -1 for CPU
+///   - config[0x7C] (npad/controller)— hardware npad for human, -1 for CPU
 ///
 /// Panel access: scene+0x250 is a std::vector of (vtable, panel_ptr) pairs (0x10 each).
 #[skyline::hook(offset = OFFSET_CLONE_WRITE)]
@@ -726,6 +1307,50 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
     // can restore it when the user returns to CSS from training mode.
     if entry_index == 0 {
         save_css_state_for_reentry();
+        // Reset npad→entry mapping. Entry 0 always uses npad 0.
+        for i in 0..8 {
+            NPAD_TO_ENTRY[i].store(-1, Ordering::Relaxed);
+        }
+        NPAD_TO_ENTRY[0].store(0, Ordering::Relaxed);
+        // Reset human entry npad tracking.
+        for slot in &HUMAN_ENTRY_NPAD {
+            slot.store(-1, Ordering::Relaxed);
+        }
+        // Reset tag/profile tracking.
+        for slot in &HUMAN_ENTRY_TAG {
+            slot.store(0, Ordering::Relaxed);
+        }
+    }
+
+    // Track human/CPU status for entry 1 from config[0x78].
+    // Entry 0 is always human (default). Entries 2/3 are tracked inside
+    // their override block below (config has CPU1's data here, not theirs).
+    if entry_index == 1 && !config.is_null() {
+        let config_type = core::ptr::read_volatile(config.add(0x78) as *const i32);
+        let is_entry1_human = config_type == 0;
+        CSS_ENTRY_IS_HUMAN[1].store(is_entry1_human, Ordering::Relaxed);
+        // Save tag/profile index for entry 1 — the game populates config[0x214] correctly.
+        let entry1_tag = core::ptr::read_volatile(config.add(0x214) as *const u32);
+        HUMAN_ENTRY_TAG[1].store(entry1_tag, Ordering::Relaxed);
+
+        if is_entry1_human {
+            // config[0x7C] is correct for entry 1 — the game populates P2's
+            // npad properly (unlike entries 2/3 which are cloned from CPU1).
+            let entry1_npad = core::ptr::read_volatile(config.add(0x7C) as *const i32);
+            HUMAN_ENTRY_NPAD[1].store(entry1_npad, Ordering::Relaxed);
+            if entry1_npad >= 0 && entry1_npad < 8 {
+                NPAD_TO_ENTRY[entry1_npad as usize].store(1, Ordering::Relaxed);
+            }
+            debug_log(&format!(
+                "clone_write: entry=1 HUMAN npad={} (from config[0x7C])",
+                entry1_npad
+            ));
+        } else {
+            // CPU P2: force npad to -1 so its CMI controller_index won't
+            // collide with a human entry that uses the same hardware npad.
+            HUMAN_ENTRY_NPAD[1].store(-1, Ordering::Relaxed);
+            core::ptr::write_volatile(config.add(0x7C) as *mut i32, -1);
+        }
     }
 
     // Diagnostic: log P2's native hash so we can see what db the game uses
@@ -773,12 +1398,45 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
 
         // Override player type and npad from the CSS panel's human/CPU flag.
         let is_cpu = read_css_panel_is_cpu(entry_index);
+        CSS_ENTRY_IS_HUMAN[entry_index as usize].store(!is_cpu, Ordering::Relaxed);
         if is_cpu {
             core::ptr::write_volatile(config.add(0x78) as *mut i32, 1); // CPU
             core::ptr::write_volatile(config.add(0x7C) as *mut i32, -1); // no controller
+            HUMAN_ENTRY_NPAD[entry_index as usize].store(-1, Ordering::Relaxed);
         } else {
             core::ptr::write_volatile(config.add(0x78) as *mut i32, 0); // human
-            core::ptr::write_volatile(config.add(0x7C) as *mut i32, entry_index as i32); // controller = entry
+            // Read the hardware npad from CSS panel or fall back to FIM-tracked npad.
+            let panel_npad = read_css_panel_npad(entry_index);
+            let fim_npad = FIM_NPAD_FOR_ENTRY[entry_index as usize].load(Ordering::Relaxed);
+            let npad = if panel_npad >= 0 {
+                panel_npad
+            } else if fim_npad >= 0 {
+                fim_npad
+            } else {
+                entry_index as i32 // last resort fallback
+            };
+            core::ptr::write_volatile(config.add(0x7C) as *mut i32, npad);
+            HUMAN_ENTRY_NPAD[entry_index as usize].store(npad, Ordering::Relaxed);
+            if npad >= 0 && npad < 8 {
+                NPAD_TO_ENTRY[npad as usize].store(entry_index as i32, Ordering::Relaxed);
+            }
+            debug_log(&format!(
+                "clone_write: entry={} HUMAN npad={} (panel={} fim={})",
+                entry_index, npad, panel_npad, fim_npad
+            ));
+        }
+
+        // Override costume index so entries 2/3 get their CSS-selected costume
+        // instead of CPU1's. config[0x90] = costume index (u8, 0-7 typically).
+        // Panel+0x210 stores the costume index set by css_panel_set_chara_hash.
+        //
+        // Only override when a character was selected from CSS (panel_hash != 0).
+        // When deactivated (panel_hash == 0), vanilla clones from P2 with
+        // deduplicated costumes — overriding would break that.
+        let saved_costume = core::ptr::read_volatile(config.add(0x90) as *const u8);
+        if panel_hash != 0 {
+            let panel_costume = read_css_panel_costume(entry_index);
+            core::ptr::write_volatile(config.add(0x90) as *mut u8, panel_costume);
         }
 
         // Override tag/profile index so clone_write loads the correct button
@@ -788,13 +1446,15 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         let panel_tag = read_css_panel_tag(entry_index);
         if !is_cpu {
             core::ptr::write_volatile(config.add(0x214) as *mut u32, panel_tag);
+            // Save tag for later profile lookup in FIM extra calls.
+            HUMAN_ENTRY_TAG[entry_index as usize].store(panel_tag, Ordering::Relaxed);
         }
 
         debug_log(&format!(
-            "clone_write: entry={} is_cpu={} hash={:#018x} tag={}",
+            "clone_write: entry={} is_cpu={} hash={:#018x} costume={} tag={}",
             entry_index, is_cpu,
             if panel_hash != 0 { panel_hash } else { saved_hash },
-            panel_tag
+            core::ptr::read_volatile(config.add(0x90) as *const u8), panel_tag
         ));
 
         call_original!(config, entry_index, byte_flag, bss_out);
@@ -803,6 +1463,7 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         core::ptr::write_volatile(config.add(0x88) as *mut u64, saved_hash);
         core::ptr::write_volatile(config.add(0x78) as *mut i32, saved_type);
         core::ptr::write_volatile(config.add(0x7C) as *mut i32, saved_npad);
+        core::ptr::write_volatile(config.add(0x90) as *mut u8, saved_costume);
         core::ptr::write_volatile(config.add(0x214) as *mut u32, saved_tag);
         return;
     }
@@ -869,6 +1530,54 @@ unsafe fn read_css_panel_tag(entry_index: u32) -> u32 {
     } else {
         0
     }
+}
+
+/// Read the costume index from the cached CSS panel for `entry_index`.
+/// panel+0x210: u8 costume index (0-7), set by css_panel_set_chara_hash.
+/// Returns 0 (default costume) on failure.
+unsafe fn read_css_panel_costume(entry_index: u32) -> u8 {
+    if entry_index as usize >= CSS_PANEL_PTRS.len() {
+        return 0;
+    }
+    let panel = CSS_PANEL_PTRS[entry_index as usize].load(Ordering::Relaxed) as *const u8;
+    if panel.is_null() {
+        return 0;
+    }
+    core::ptr::read_volatile(panel.add(0x210))
+}
+
+/// Read the hardware npad from the cached CSS panel for `entry_index`.
+/// Scans several candidate offsets since the exact field is unconfirmed.
+/// Returns the npad (>= 0) if found, or -1 on failure.
+unsafe fn read_css_panel_npad(entry_index: u32) -> i32 {
+    if entry_index as usize >= CSS_PANEL_PTRS.len() {
+        return -1;
+    }
+    let panel = CSS_PANEL_PTRS[entry_index as usize].load(Ordering::Relaxed) as *const u8;
+    if panel.is_null() {
+        return -1;
+    }
+
+    // Diagnostic: dump candidate panel offsets that might store npad.
+    // panel+0x1F8 = is_cpu (known), so npad might be nearby.
+    let v_1f4 = core::ptr::read_volatile(panel.add(0x1F4) as *const i32);
+    let v_1fc = core::ptr::read_volatile(panel.add(0x1FC) as *const i32);
+    let v_208 = core::ptr::read_volatile(panel.add(0x208) as *const i32);
+    let v_20c = core::ptr::read_volatile(panel.add(0x20C) as *const i32);
+    let v_210 = core::ptr::read_volatile(panel.add(0x210) as *const i32);
+    let v_1f0 = core::ptr::read_volatile(panel.add(0x1F0) as *const i32);
+    debug_log(&format!(
+        "panel_npad_scan: entry={} +0x1F0={} +0x1F4={} +0x1FC={} +0x208={} +0x20C={} +0x210={}",
+        entry_index, v_1f0, v_1f4, v_1fc, v_208, v_20c, v_210
+    ));
+
+    // Best guess: panel+0x1FC (right after is_cpu at +0x1F8).
+    // Accept if it's a small non-negative integer (valid npad range 0..7).
+    if v_1fc >= 0 && v_1fc < 8 {
+        return v_1fc;
+    }
+
+    -1
 }
 
 /// Save all 4 panels' state so css_panel_layout_hook can restore it on re-entry.

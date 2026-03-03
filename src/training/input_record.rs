@@ -462,12 +462,22 @@ pub unsafe fn handle_final_input_mapping(player_idx: i32, out: *mut MappedInputs
 
 #[skyline::hook(offset = *OFFSET_SET_CPU_CONTROLS)] // After cpu controls are assigned from ai calls
 unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
+    use crate::training::doubles;
+
+    let controller_data = *p_data.add(1) as *mut ControlModuleInternal;
+
     call_original!(p_data);
+
     if !is_training_mode() {
         return;
     }
 
-    let controller_data = *p_data.add(1) as *mut ControlModuleInternal;
+    // For human entries: override AI output with saved FIM-produced input.
+    // inject_human_input uses the per-frame call counter to identify the entry.
+    if doubles::inject_human_input(controller_data) {
+        // Human entry — controller input injected. Skip input_record.
+        return;
+    }
 
     // Check if we need to begin playback this frame due to a mash toggle
     // TODO: Setup STARTING_STATUS based on current playback slot here

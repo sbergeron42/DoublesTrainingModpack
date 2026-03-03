@@ -51,6 +51,8 @@ pub unsafe fn parse_anim_transform(anim_transform: &mut AnimTransform, layout_na
                 let (hundreds, tens, ones, dec) = get_player_dmg_digits(match layout_name {
                     "p1" => FighterId::Player,
                     "p2" => FighterId::CPU,
+                    "p3" => FighterId::CPU2,
+                    "p4" => FighterId::CPU3,
                     _ => panic!("Unknown layout name: {}", layout_name),
                 });
 
@@ -76,7 +78,7 @@ pub unsafe fn parse_anim_transform(anim_transform: &mut AnimTransform, layout_na
 pub unsafe fn draw(root_pane: &Pane, layout_name: &str) {
     // Update percentage display as soon as possible on death
     if is_training_mode() && is_ready_go() && layout_name == "info_melee" {
-        for player_name in &["p1", "p2"] {
+        for player_name in &["p1", "p2", "p3", "p4"] {
             if let Some(parent) = root_pane.find_pane_by_name_recursive(player_name) {
                 let _p1_layout_name = skyline::from_c_str((*parent.as_parts().layout).layout_name);
                 let anim_list = &mut (*parent.as_parts().layout).anim_trans_list;
@@ -85,6 +87,8 @@ pub unsafe fn draw(root_pane: &Pane, layout_name: &str) {
                 let (hundreds, tens, _, _) = get_player_dmg_digits(match *player_name {
                     "p1" => FighterId::Player,
                     "p2" => FighterId::CPU,
+                    "p3" => FighterId::CPU2,
+                    "p4" => FighterId::CPU3,
                     _ => panic!("Unknown player name: {}", player_name),
                 });
 

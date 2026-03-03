@@ -99,25 +99,19 @@ pub fn is_operation_cpu(module_accessor: &mut app::BattleObjectModuleAccessor) -
             return false;
         }
 
+        // Doubles: entries set as human at CSS should never receive
+        // modpack AI (mash, DI, etc.) even if the game thinks they're CPU.
+        if is_training_mode()
+            && crate::training::doubles::is_human_entry(entry_id_int)
+        {
+            return false;
+        }
+
         let entry_id = app::FighterEntryID(entry_id_int);
         let mgr = *(read(&FIGHTER_MANAGER_ADDR) as *mut *mut app::FighterManager);
         let fighter_information = FighterManager::get_fighter_information(mgr, entry_id);
 
-        if FighterInformation::is_operation_cpu(fighter_information) {
-            return true;
-        }
-
-        // Doubles override: when a teammate slot is configured, non-teammate CPU
-        // slots should still receive modpack AI even though the game has set them
-        // all to "player operation" (CPU Behavior = Control globally).
-        if is_training_mode() {
-            let teammate = read(&MENU).teammate_slot.selected_index();
-            if teammate > 0 && entry_id_int != teammate as i32 {
-                return true;
-            }
-        }
-
-        false
+        FighterInformation::is_operation_cpu(fighter_information)
     }
 }
 
