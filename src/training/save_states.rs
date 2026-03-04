@@ -259,16 +259,49 @@ unsafe fn get_slot() -> usize {
 
 pub unsafe fn is_killing() -> bool {
     let s = get_slot();
-    [save_state_player(s), save_state_cpu(s), save_state_cpu2(s), save_state_cpu3(s)]
-        .iter()
-        .any(|ss| ss.state == KillPlayer || ss.state == WaitForAlive)
+    for i in 0..4i32 {
+        let ss = save_state_for_entry(i, s);
+        if (ss.state == KillPlayer || ss.state == WaitForAlive) && entry_is_active(i) {
+            return true;
+        }
+    }
+    false
 }
 
 pub unsafe fn is_loading() -> bool {
     let s = get_slot();
-    [save_state_player(s), save_state_cpu(s), save_state_cpu2(s), save_state_cpu3(s)]
-        .iter()
-        .any(|ss| ss.state != NoAction)
+    for i in 0..4i32 {
+        let ss = save_state_for_entry(i, s);
+        if ss.state != NoAction {
+            if entry_is_active(i) {
+                return true;
+            } else {
+                // Entry not on screen — clear stuck state
+                ss.state = NoAction;
+            }
+        }
+    }
+    false
+}
+
+/// Frame counter incremented once per frame (when entry 0's save_states runs).
+static SAVE_STATE_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Last frame each entry had save_states() called.
+static ENTRY_LAST_SEEN: [std::sync::atomic::AtomicU32; 4] = [
+    std::sync::atomic::AtomicU32::new(0),
+    std::sync::atomic::AtomicU32::new(0),
+    std::sync::atomic::AtomicU32::new(0),
+    std::sync::atomic::AtomicU32::new(0),
+];
+
+/// Returns true if save_states() was called for this entry within the last 2 frames.
+/// This distinguishes on-screen fighters from "benched" fighters that exist in memory
+/// but aren't processed by the game (e.g. entry 3 when CPU count < 3).
+fn entry_is_active(entry_id: i32) -> bool {
+    if entry_id < 0 || entry_id >= 4 { return false; }
+    let current = SAVE_STATE_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+    let last_seen = ENTRY_LAST_SEEN[entry_id as usize].load(std::sync::atomic::Ordering::Relaxed);
+    current.wrapping_sub(last_seen) <= 2
 }
 
 pub unsafe fn should_mirror() -> f32 {
@@ -440,6 +473,17 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
     let selected_slot = get_slot();
     let status = StatusModule::status_kind(module_accessor);
     let entry_id = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+
+    // Track which entries are actively processed by the game
+    if entry_id == 0 {
+        SAVE_STATE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if entry_id >= 0 && entry_id < 4 {
+        ENTRY_LAST_SEEN[entry_id as usize].store(
+            SAVE_STATE_FRAME.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     let is_cpu = entry_id != 0;
     let save_state = save_state_for_entry(entry_id, selected_slot);
 
@@ -479,9 +523,9 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
             };
 
             save_state_player(slot).state = KillPlayer;
-            save_state_cpu(slot).state = KillPlayer;
-            save_state_cpu2(slot).state = KillPlayer;
-            save_state_cpu3(slot).state = KillPlayer;
+            if entry_is_active(1) { save_state_cpu(slot).state = KillPlayer; }
+            if entry_is_active(2) { save_state_cpu2(slot).state = KillPlayer; }
+            if entry_is_active(3) { save_state_cpu3(slot).state = KillPlayer; }
         }
         MIRROR_STATE = should_mirror();
         // end input recording playback
@@ -726,9 +770,9 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
         MIRROR_STATE = 1.0;
         let save_slot = read(&MENU).save_state_slot.into_idx().unwrap_or(0);
         save_state_player(save_slot).state = Save;
-        save_state_cpu(save_slot).state = Save;
-        save_state_cpu2(save_slot).state = Save;
-        save_state_cpu3(save_slot).state = Save;
+        if entry_is_active(1) { save_state_cpu(save_slot).state = Save; }
+        if entry_is_active(2) { save_state_cpu2(save_slot).state = Save; }
+        if entry_is_active(3) { save_state_cpu3(save_slot).state = Save; }
         notifications::clear_notification("Save State");
         notifications::notification(
             "Save State".to_string(),
@@ -775,12 +819,11 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
             0,
         );
 
-        // If all fighters finished saving by now
-        if save_state_player(selected_slot).state != Save
-            && save_state_cpu(selected_slot).state != Save
-            && save_state_cpu2(selected_slot).state != Save
-            && save_state_cpu3(selected_slot).state != Save
-        {
+        // If all active fighters finished saving by now
+        let all_saved = (0..4i32).all(|i| {
+            !entry_is_active(i) || save_state_for_entry(i, selected_slot).state != Save
+        });
+        if all_saved {
             std::thread::spawn(move || save_to_file());
         }
     }
