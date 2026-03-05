@@ -12,11 +12,249 @@
 ///   so CPU Behavior doesn't need to be forced.
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+use skyline::nn::ui2d::{Material, MaterialFlags, MaterialColorType, Pane, ResColor};
 use smash::app::{lua_bind::*, BattleObjectModuleAccessor};
 use smash::lib::lua_const::*;
+use smash::ui2d::{SmashPane, SmashTextBox};
 use training_mod_sync::*;
 
+// ---------------------------------------------------------------------------
+// nn::hid constants for NpadFullKeyState button bitfield
+// ---------------------------------------------------------------------------
+const HID_X: u64 = 1 << 2;
+const HID_ZR: u64 = 1 << 9;
+const HID_DPAD_LEFT: u64 = 1 << 12;
+const HID_DPAD_UP: u64 = 1 << 13;
+const HID_DPAD_RIGHT: u64 = 1 << 14;
+const HID_DPAD_DOWN: u64 = 1 << 15;
+
 use crate::common::{FIGHTER_MANAGER_ADDR, MENU};
+
+// ---------------------------------------------------------------------------
+// Native FIM dispatch: BSS offsets and cached input manager pointer
+// ---------------------------------------------------------------------------
+
+/// BSS offset: global controller pointer table (10 entries, 8 bytes each).
+/// The FIM dispatch loop reads controller ptrs from this table using the slot
+/// index stored at input_mgr + 0x298 + player_idx * 4.
+const CONTROLLER_TABLE_BSS: usize = 0x5338860;
+
+/// BSS offset: controller system flag struct. The byte at +8 controls whether
+/// the FIM dispatch loop uses per-slot controller lookup (nonzero) or a single
+/// default controller for all entries (zero).
+const CONTROLLER_FLAG_BSS: usize = 0x53388b0;
+
+/// Cached pointer to the input manager struct (computed from FIM mappings arg - 0x18).
+/// Used by inject_human_input to read native FIM output from the output array.
+static INPUT_MGR_PTR: AtomicUsize = AtomicUsize::new(0);
+
+/// Save the input manager pointer (called from FIM hook at player_idx==0).
+pub fn save_input_mgr_ptr(ptr: usize) {
+    INPUT_MGR_PTR.store(ptr, Ordering::Relaxed);
+}
+
+/// Set up the input manager's controller slot + mappings arrays so the FIM
+/// dispatch loop fires natively for human entries 2/3.
+///
+/// Called once per frame from FIM hook at player_idx==0 (before the dispatch
+/// loop reaches entries 2/3, since it processes sequentially).
+///
+/// Two-pass assignment:
+///   Pass 1 — entries with a reliable npad (!= P1's): match to table entry by
+///            reading npad_number from each Controller (offset 0xc4).
+///   Pass 2 — entries with unreliable npad (== P1's): assign remaining slots.
+///
+/// This prevents wrong controller-type assignment when GC and Pro controllers
+/// are mixed (the table scan order doesn't necessarily match entry order).
+pub unsafe fn setup_native_fim_for_humans(
+    input_mgr: usize,
+    _mappings: *mut ControllerMapping,
+) {
+    use skyline::hooks::{getRegionAddress, Region};
+    let text_base = getRegionAddress(Region::Text) as usize;
+    let ctrl_table = (text_base + CONTROLLER_TABLE_BSS) as *const usize;
+
+    static SETUP_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    // Ensure the per-controller lookup flag is enabled (byte at flag_struct + 8).
+    // When this is 0, the dispatch loop uses a single default controller for all
+    // entries instead of looking up per-slot — we need per-slot mode.
+    let flag_ptr = (text_base + CONTROLLER_FLAG_BSS + 8) as *mut u8;
+    if core::ptr::read_volatile(flag_ptr) == 0 {
+        core::ptr::write_volatile(flag_ptr, 1);
+        debug_log("NATIVE_FIM_SETUP: enabled per-controller flag");
+    }
+
+    // --- Identify P1's controller and npad ---
+    let p1_slot = core::ptr::read_volatile((input_mgr + 0x298) as *const i32);
+    let p1_ctrl: usize = if p1_slot >= 0 && p1_slot < 10 {
+        let some_ctrl = core::ptr::read_volatile(ctrl_table.add(p1_slot as usize));
+        if some_ctrl != 0 {
+            core::ptr::read_volatile((some_ctrl + 0x10) as *const usize)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let p1_npad = HUMAN_ENTRY_NPAD[0].load(Ordering::Relaxed); // P1's npad (usually 0)
+
+    // --- Scan table: build list of connected non-P1 controllers with npad_number ---
+    // Each entry: (slot, controller_addr, npad_number)
+    let mut avail_slot: [i32; 10] = [-1; 10];
+    let mut avail_ctrl: [usize; 10] = [0; 10];
+    let mut avail_npad: [i32; 10] = [-1; 10];
+    let mut avail_used: [bool; 10] = [false; 10]; // tracks assignment
+    let mut num_avail: usize = 0;
+
+    for slot in 0..10i32 {
+        if slot == p1_slot {
+            continue;
+        }
+        let some_ctrl = core::ptr::read_volatile(ctrl_table.add(slot as usize));
+        if some_ctrl == 0 {
+            continue;
+        }
+        let controller = core::ptr::read_volatile((some_ctrl + 0x10) as *const usize);
+        if controller == 0 || controller == p1_ctrl {
+            continue;
+        }
+        // Check connected/valid flag at Controller + 0xb8
+        let connected = core::ptr::read_volatile((controller + 0xb8) as *const u8);
+        if connected == 0 {
+            continue;
+        }
+        // Read npad_number at Controller + 0xc4
+        let npad_num = core::ptr::read_volatile((controller + 0xc4) as *const u32) as i32;
+
+        avail_slot[num_avail] = slot;
+        avail_ctrl[num_avail] = controller;
+        avail_npad[num_avail] = npad_num;
+        num_avail += 1;
+    }
+
+    // --- Collect human entries ---
+    let mut human_entries: [i32; 3] = [-1; 3];
+    let mut num_humans: usize = 0;
+    for entry_id in 1i32..=3 {
+        if is_human_entry(entry_id) {
+            human_entries[num_humans] = entry_id;
+            num_humans += 1;
+        }
+    }
+
+    // --- Per-entry assignment results ---
+    let mut entry_assigned: [i32; 4] = [-1; 4]; // indexed by entry_id
+
+    // --- Pass 1: entries with a RELIABLE npad (different from P1's) ---
+    // Match by npad_number from the table. This ensures the correct physical
+    // controller (and thus correct controller type for GC vs Pro) is assigned.
+    for i in 0..num_humans {
+        let entry_id = human_entries[i];
+        let npad = HUMAN_ENTRY_NPAD[entry_id as usize].load(Ordering::Relaxed);
+        if npad < 0 || npad == p1_npad {
+            continue; // unreliable — defer to pass 2
+        }
+        // Find the table entry whose Controller has npad_number == npad
+        for j in 0..num_avail {
+            if avail_used[j] {
+                continue;
+            }
+            if avail_npad[j] == npad {
+                entry_assigned[entry_id as usize] = avail_slot[j] as i32;
+                avail_used[j] = true;
+                // Update CONTROLLER_PTRS so downstream code has the right address
+                if (npad as usize) < CONTROLLER_PTRS.len() {
+                    CONTROLLER_PTRS[npad as usize].store(avail_ctrl[j], Ordering::Relaxed);
+                }
+                break;
+            }
+        }
+    }
+
+    // --- Pass 2: entries with UNRELIABLE npad (== P1's or unknown) ---
+    // Assign from remaining (unused) available slots.
+    for i in 0..num_humans {
+        let entry_id = human_entries[i];
+        if entry_assigned[entry_id as usize] >= 0 {
+            continue; // already assigned in pass 1
+        }
+        // Find next unused available slot
+        for j in 0..num_avail {
+            if avail_used[j] {
+                continue;
+            }
+            entry_assigned[entry_id as usize] = avail_slot[j] as i32;
+            avail_used[j] = true;
+            // Self-correct npad to the table entry's npad_number
+            let real_npad = avail_npad[j];
+            set_human_entry_npad(entry_id, real_npad);
+            if real_npad >= 0 && (real_npad as usize) < CONTROLLER_PTRS.len() {
+                CONTROLLER_PTRS[real_npad as usize].store(avail_ctrl[j], Ordering::Relaxed);
+            }
+            break;
+        }
+    }
+
+    // --- Write slots and mappings for all assigned entries ---
+    for i in 0..num_humans {
+        let entry_id = human_entries[i];
+        let assigned_slot = entry_assigned[entry_id as usize];
+        if assigned_slot < 0 {
+            let log_count = SETUP_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+            if log_count < 10 {
+                let npad = HUMAN_ENTRY_NPAD[entry_id as usize].load(Ordering::Relaxed);
+                debug_log(&format!(
+                    "NATIVE_FIM_SETUP: entry={} SKIPPED — no available controllers (npad={} p1_npad={} avail={})",
+                    entry_id, npad, p1_npad, num_avail
+                ));
+            }
+            continue;
+        }
+
+        // Write the controller slot so FIM dispatch fires for this entry
+        let slot_addr = (input_mgr + 0x298 + entry_id as usize * 4) as *mut i32;
+        core::ptr::write_volatile(slot_addr, assigned_slot);
+
+        // Write the correct profile button mappings.
+        // tag == 0 means "no profile selected" (or first custom profile — accepted
+        // edge case). Use game defaults so tap-jump and standard bindings work.
+        let tag = HUMAN_ENTRY_TAG[entry_id as usize].load(Ordering::Relaxed);
+        let dst = (input_mgr + 0x18 + entry_id as usize * 0x50) as *mut ControllerMapping;
+        if tag > 0 {
+            if let Some(mapping) = get_profile_mapping(tag) {
+                core::ptr::write_volatile(dst, mapping);
+            } else {
+                core::ptr::write_volatile(dst, DEFAULT_CONTROLLER_MAPPING);
+            }
+        } else {
+            core::ptr::write_volatile(dst, DEFAULT_CONTROLLER_MAPPING);
+        }
+
+        // Diagnostic logging
+        let log_count = SETUP_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+        if log_count < 15 {
+            // Find which avail entry was used to get the controller type
+            let mut ctrl_type: i32 = -1;
+            let mut ctrl_npad: i32 = -1;
+            for j in 0..num_avail {
+                if avail_slot[j] == assigned_slot {
+                    ctrl_npad = avail_npad[j];
+                    // Read controller type at Controller + 0x9c
+                    ctrl_type = core::ptr::read_volatile(
+                        (avail_ctrl[j] + 0x9c) as *const i32,
+                    );
+                    break;
+                }
+            }
+            let entry_npad = HUMAN_ENTRY_NPAD[entry_id as usize].load(Ordering::Relaxed);
+            debug_log(&format!(
+                "NATIVE_FIM_SETUP: entry={} npad={} slot={} ctrl_type={} ctrl_npad={} tag={} p1_slot={} avail={}",
+                entry_id, entry_npad, assigned_slot, ctrl_type, ctrl_npad, tag, p1_slot, num_avail
+            ));
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SD card debug log
@@ -73,26 +311,77 @@ pub unsafe fn set_cpu_hit_team(module_accessor: &mut BattleObjectModuleAccessor)
 // Training mode forces all non-P1 entries to CPU. For entries designated as
 // human at CSS, we need to inject their hardware controller input.
 //
-// Key discovery: FIM fires for player_idx > 0 in training mode when
-// config[0x78]=0 (human entry). For CPU entries (config[0x78]=1), FIM only
-// fires for player_idx=0. We capture the game's native FIM output for
-// human entries at player_idx > 0 (correct controller, correct profile).
-// As fallback for entries that may not get native FIM calls (e.g. entries
-// 2/3), we also call FIM's original during player_idx=0 with saved
-// Controller pointers from CSS.
+// Approach: patch the input manager's controller slot and mappings arrays so
+// the FIM dispatch loop (at offset 0x17547f0) fires natively for human entries.
+// The dispatch loop reads controller slots sequentially per iteration, so
+// writing valid slots during the player_idx=0 FIM hook makes them visible for
+// entries 2/3 later in the same frame.
 //
-// Approach:
-//   1. During CSS: FIM fires for all player_idx — save Controller ptrs per npad
-//   2. During training FIM (player_idx=0): call FIM original for each human
-//      entry's npad using the saved Controller ptr (fallback)
-//   3. During training FIM (player_idx > 0): if human entry, capture native
-//      FIM output (overwrites fallback with correct data)
-//   4. In set_cpu_controls: for human entries, override AI output with saved
-//      MappedInputs; for CPU entries, let AI output stand
+//   1. During CSS: save Controller ptrs per npad and button mappings per npad
+//   2. During training FIM (player_idx=0): setup_native_fim_for_humans() writes
+//      valid controller slots and saved mappings into the input manager
+//   3. FIM dispatch loop fires natively for entries 2/3 (no extra calls needed)
+//   4. In set_cpu_controls: inject_human_input reads native FIM output from the
+//      input manager's output array at input_mgr + 0x2B8 + entry * 8
 
 use crate::common::input::{
     Buttons, ControlModuleInternal, Controller, ControllerMapping, ControllerStyle, InputKind,
     MappedInputs,
+};
+
+/// Game-default controller mapping: used when no profile is selected (tag == 0).
+/// Matches SSBU's factory-default controls for all controller types.
+const DEFAULT_CONTROLLER_MAPPING: ControllerMapping = ControllerMapping {
+    // GC Controller defaults
+    gc_l: InputKind::Guard,
+    gc_r: InputKind::Guard,
+    gc_z: InputKind::Grab,
+    gc_dup: InputKind::AppealHi,
+    gc_dlr: InputKind::AppealS,
+    gc_ddown: InputKind::AppealLw,
+    gc_a: InputKind::Attack,
+    gc_b: InputKind::Special,
+    gc_cstick: InputKind::SmashAttack,
+    gc_y: InputKind::Jump,
+    gc_x: InputKind::Jump,
+    gc_rumble: true,
+    gc_absmash: false,
+    gc_tapjump: true,
+    gc_sensitivity: 0,
+    // Pro Controller defaults
+    pro_l: InputKind::Guard,
+    pro_r: InputKind::Guard,
+    pro_zl: InputKind::Guard,
+    pro_zr: InputKind::Grab,
+    pro_dup: InputKind::AppealHi,
+    pro_dlr: InputKind::AppealS,
+    pro_ddown: InputKind::AppealLw,
+    pro_a: InputKind::Attack,
+    pro_b: InputKind::Special,
+    pro_cstick: InputKind::SmashAttack,
+    pro_x: InputKind::Jump,
+    pro_y: InputKind::Jump,
+    pro_rumble: true,
+    pro_absmash: false,
+    pro_tapjump: true,
+    pro_sensitivity: 0,
+    // Joycon defaults
+    joy_shoulder: InputKind::Guard,
+    joy_zshoulder: InputKind::Grab,
+    joy_sl: InputKind::Guard,
+    joy_sr: InputKind::Guard,
+    joy_up: InputKind::AppealHi,
+    joy_right: InputKind::AppealS,
+    joy_left: InputKind::AppealS,
+    joy_down: InputKind::AppealLw,
+    joy_rumble: true,
+    joy_absmash: false,
+    joy_tapjump: true,
+    joy_sensitivity: 0,
+    // Padding/unknown
+    _2b: 0, _2c: 0, _2d: 0, _2e: 0, _2f: 0, _30: 0, _31: 0, _32: 0,
+    is_absmash: false,
+    _34: [0; 0x1C],
 };
 
 /// Per-frame call counter for set_cpu_controls. Incremented each call,
@@ -345,44 +634,10 @@ pub unsafe fn get_saved_ctrl_mapping(npad: i32) -> *const ControllerMapping {
     }
 }
 
-/// Saved MappedInputs for each human entry, produced by calling FIM's
-/// original function in the FIM hook for each human entry's controller.
-static HUMAN_MAPPED_INPUTS: [RwLock<MappedInputs>; 4] = [
-    RwLock::new(MappedInputs::empty()),
-    RwLock::new(MappedInputs::empty()),
-    RwLock::new(MappedInputs::empty()),
-    RwLock::new(MappedInputs::empty()),
-];
-
-/// Tracks whether save_human_mapped_input was called this frame for each entry.
-/// Distinguishes "player is idle (zero input)" from "FIM extra call didn't fire".
-static HUMAN_INPUT_CAPTURED: [AtomicBool; 4] = [
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-];
-
-/// Save a human entry's mapped input (called from FIM hook).
-pub fn save_human_mapped_input(entry_id: i32, mapped: &MappedInputs) {
-    if entry_id >= 0 && (entry_id as usize) < HUMAN_MAPPED_INPUTS.len() {
-        assign(&HUMAN_MAPPED_INPUTS[entry_id as usize], *mapped);
-        HUMAN_INPUT_CAPTURED[entry_id as usize].store(true, Ordering::Relaxed);
-    }
-}
-
-/// Clear all saved mapped inputs (called at start of each frame from FIM hook).
-pub fn clear_human_mapped_inputs() {
-    for slot in &HUMAN_MAPPED_INPUTS {
-        assign(slot, MappedInputs::empty());
-    }
-    for flag in &HUMAN_INPUT_CAPTURED {
-        flag.store(false, Ordering::Relaxed);
-    }
-}
-
 /// Called from set_cpu_controls AFTER call_original!.
 /// Uses the per-frame call counter to identify the entry (Nth call = entry N).
-/// For human entries: ALWAYS overrides AI output — injects saved FIM-produced
-/// MappedInputs if captured, or zeros the CMI if not (so AI never autopilots).
+/// For human entries: reads native FIM output from the input manager's output
+/// array (populated by the dispatch loop after we set up valid controller slots).
 /// For CPU entries: no change (AI output is kept).
 /// Returns true if this is a human entry (caller should skip input_record).
 pub unsafe fn inject_human_input(cmi: *mut ControlModuleInternal) -> bool {
@@ -396,83 +651,54 @@ pub unsafe fn inject_human_input(cmi: *mut ControlModuleInternal) -> bool {
         return false;
     }
 
-    use crate::training::input_record::{STICK_CLAMP_MULTIPLIER, STICK_NEUTRAL};
-
-    if HUMAN_INPUT_CAPTURED[entry_id as usize].load(Ordering::Relaxed) {
-        // FIM captured input this frame — inject it.
-        let mapped = read(&HUMAN_MAPPED_INPUTS[entry_id as usize]);
-
-        // Convert MappedInputs → CMI format (same conversion as input_record playback)
-        (*cmi).buttons = mapped.buttons;
-        (*cmi).stick_x = (mapped.lstick_x as f32) / (i8::MAX as f32);
-        (*cmi).stick_y = (mapped.lstick_y as f32) / (i8::MAX as f32);
-
-        let clamp_x = ((mapped.lstick_x as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
-        let clamp_y = ((mapped.lstick_y as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
-        (*cmi).clamped_lstick_x = if clamp_x.abs() >= STICK_NEUTRAL { clamp_x } else { 0.0 };
-        (*cmi).clamped_lstick_y = if clamp_y.abs() >= STICK_NEUTRAL { clamp_y } else { 0.0 };
-
-        let rclamp_x = ((mapped.rstick_x as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
-        let rclamp_y = ((mapped.rstick_y as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
-        (*cmi).clamped_rstick_x = if rclamp_x.abs() >= STICK_NEUTRAL { rclamp_x } else { 0.0 };
-        (*cmi).clamped_rstick_y = if rclamp_y.abs() >= STICK_NEUTRAL { rclamp_y } else { 0.0 };
-    } else {
-        // No FIM capture this frame (e.g. Controller ptr not yet saved during startup).
-        // Zero the CMI so the character stands still instead of AI autopiloting.
+    let input_mgr = INPUT_MGR_PTR.load(Ordering::Relaxed);
+    if input_mgr == 0 {
+        // Input manager not yet captured — zero ALL CMI fields to prevent AI autopilot.
         (*cmi).buttons = Buttons::empty();
         (*cmi).stick_x = 0.0;
         (*cmi).stick_y = 0.0;
+        (*cmi).padding = [0.0; 2];
+        (*cmi).unk = [0; 8];
         (*cmi).clamped_lstick_x = 0.0;
         (*cmi).clamped_lstick_y = 0.0;
+        (*cmi).padding2 = [0.0; 2];
         (*cmi).clamped_rstick_x = 0.0;
         (*cmi).clamped_rstick_y = 0.0;
+        return true;
     }
+
+    // Read native FIM output from the input manager's output array.
+    // The dispatch loop writes MappedInputs at input_mgr + 0x2B8 + player_idx * 8.
+    // If FIM fired for this entry (we set up a valid slot), this contains correct
+    // mapped input. If not (slot was invalid), the dispatch loop zeroed it —
+    // which is also correct behavior (character stands still).
+    let output_ptr = (input_mgr + 0x2B8 + entry_id as usize * 8) as *const MappedInputs;
+    let mapped = core::ptr::read_volatile(output_ptr);
+
+    use crate::training::input_record::{STICK_CLAMP_MULTIPLIER, STICK_NEUTRAL};
+
+    // Convert MappedInputs → CMI format.
+    // Zero ALL fields to prevent AI-generated data from call_original! leaking
+    // through unwritten fields (padding, unk[8], padding2). The unk field likely
+    // contains previous-buttons / just-pressed flags that the game reads.
+    (*cmi).buttons = mapped.buttons;
+    (*cmi).stick_x = (mapped.lstick_x as f32) / (i8::MAX as f32);
+    (*cmi).stick_y = (mapped.lstick_y as f32) / (i8::MAX as f32);
+    (*cmi).padding = [0.0; 2];
+    (*cmi).unk = [0; 8];
+
+    let clamp_x = ((mapped.lstick_x as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+    let clamp_y = ((mapped.lstick_y as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+    (*cmi).clamped_lstick_x = if clamp_x.abs() >= STICK_NEUTRAL { clamp_x } else { 0.0 };
+    (*cmi).clamped_lstick_y = if clamp_y.abs() >= STICK_NEUTRAL { clamp_y } else { 0.0 };
+    (*cmi).padding2 = [0.0; 2];
+
+    let rclamp_x = ((mapped.rstick_x as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+    let rclamp_y = ((mapped.rstick_y as f32) * STICK_CLAMP_MULTIPLIER).clamp(-1.0, 1.0);
+    (*cmi).clamped_rstick_x = if rclamp_x.abs() >= STICK_NEUTRAL { rclamp_x } else { 0.0 };
+    (*cmi).clamped_rstick_y = if rclamp_y.abs() >= STICK_NEUTRAL { rclamp_y } else { 0.0 };
 
     true
-}
-
-/// Capture the game's normal FIM output for human entries at player_idx > 0.
-/// When the game fires FIM for these entries naturally (which happens when
-/// config[0x78]=0, i.e. human), this overwrites any stale data from the
-/// FIM extra calls (which may have used the wrong controller).
-///
-/// Called from the FIM hook right after original!() for player_idx > 0.
-/// FIM's native output already has correct button mapping from internal state
-/// (set up by clone_write via config[0x214]), so we do NOT apply
-/// apply_profile_button_remap here — that would corrupt the correct output.
-pub unsafe fn capture_native_fim_output(
-    player_idx: i32,
-    out: &MappedInputs,
-    _controller_addr: usize,
-) {
-    if player_idx < 1 || player_idx > 3 {
-        return;
-    }
-    if !is_human_entry(player_idx) {
-        return;
-    }
-
-    let mut captured = *out;
-
-    // Strip phantom FLICK_JUMP — same logic as FIM extra calls
-    if captured.buttons.contains(Buttons::FLICK_JUMP) && captured.lstick_y < 56 {
-        captured.buttons &= !Buttons::FLICK_JUMP;
-    }
-
-    // Diagnostic: log native FIM output periodically to compare with FIM extra call
-    {
-        static NATIVE_DIAG_CTR: AtomicU32 = AtomicU32::new(0);
-        let ctr = NATIVE_DIAG_CTR.fetch_add(1, Ordering::Relaxed);
-        if ctr < 10 || ctr % 120 == 0 {
-            debug_log(&format!(
-                "NATIVE_FIM: pidx={} btns={:#x} lstick=({},{})",
-                player_idx, captured.buttons.bits(),
-                captured.lstick_x, captured.lstick_y,
-            ));
-        }
-    }
-
-    save_human_mapped_input(player_idx, &captured);
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +976,220 @@ const OFFSET_CLONE_WRITE: usize = 0x1788260;
 /// Confirmed via GDB hardware watchpoint on panel+0x1F8 during manual CPU→human switch.
 const OFFSET_SET_PANEL_TYPE: usize = 0x1A028B0;
 
+/// Offset of FUN_7101db1910 (btn_rule handler): manages the Solo/Team toggle
+/// button on the CSS. Reads scene_obj+0x44d as a transient "press in progress"
+/// flag; returns 1 when the toggle animation completes.
+const OFFSET_BTN_RULE_HANDLER: usize = 0x1db1910;
+
+/// Team mode flag — persists across training resets, toggled at CSS.
+/// true = Team Battle, false = Solo Battle (default).
+static TEAM_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Address of the vanilla team battle flag byte in .bss.
+/// DAT_71052c41e8 — read by app::global_parameter::is_team_battle().
+const TEAM_BATTLE_FLAG_BSS: usize = 0x52c41e8;
+
+pub fn is_team_mode() -> bool {
+    TEAM_MODE.load(Ordering::Relaxed)
+}
+
+/// Keep vanilla is_team_battle() in sync with our TEAM_MODE flag.
+/// Called once per frame from once_per_frame_per_fighter (entry 0).
+pub unsafe fn sync_team_battle_flag() {
+    let text_base = skyline::hooks::getRegionAddress(
+        skyline::hooks::Region::Text,
+    ) as usize;
+    let flag_ptr = (text_base + TEAM_BATTLE_FLAG_BSS) as *mut u8;
+    let desired = if TEAM_MODE.load(Ordering::Relaxed) { 1u8 } else { 0u8 };
+    core::ptr::write_volatile(flag_ptr, desired);
+}
+
+// ---------------------------------------------------------------------------
+// Background nn::hid polling thread
+// ---------------------------------------------------------------------------
+//
+// nn::hid::GetNpadFullKeyState crashes when called from the draw/render
+// thread. To get controller input during CSS (where FIM hasn't fired yet),
+// we spawn a background thread that polls nn::hid every ~16ms and stores
+// the result in atomics. The draw hook reads these atomics for team toggle
+// and color cycling.
+
+/// Current button bitmask from the background hid polling thread.
+static HID_POLL_CURRENT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the hid polling thread has been started.
+static HID_POLL_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Start the background hid polling thread (idempotent — only starts once).
+fn ensure_hid_poll_thread() {
+    if HID_POLL_STARTED.swap(true, Ordering::SeqCst) {
+        return; // already running
+    }
+    std::thread::spawn(|| unsafe {
+        // Buffer must be >= 0x100 (matching HDR's approach).
+        let mut buf = [0u8; 0x100];
+        loop {
+            skyline::nn::hid::GetNpadFullKeyState(
+                buf.as_mut_ptr() as _,
+                &0i32 as *const _ as _,
+            );
+            let buttons = core::ptr::read_volatile(buf.as_ptr().add(0x08) as *const u64);
+            HID_POLL_CURRENT.store(buttons, Ordering::Relaxed);
+            // ~60fps polling (16ms = 16_000_000 ns)
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Team flag material colors (white/black res colors for flag_color pane)
+// ---------------------------------------------------------------------------
+
+const TEAM_FLAG_COLORS: [(ResColor, ResColor); 4] = [
+    // Red team — vivid red
+    (ResColor { r: 255, g: 20, b: 20, a: 255 }, ResColor { r: 200, g: 0, b: 0, a: 0 }),
+    // Blue team — vivid blue
+    (ResColor { r: 20, g: 50, b: 255, a: 255 }, ResColor { r: 0, g: 30, b: 200, a: 0 }),
+    // Green team — vivid green
+    (ResColor { r: 20, g: 255, b: 20, a: 255 }, ResColor { r: 0, g: 200, b: 0, a: 0 }),
+    // Yellow team — vivid yellow
+    (ResColor { r: 255, g: 240, b: 20, a: 255 }, ResColor { r: 200, g: 190, b: 0, a: 0 }),
+];
+
+/// Read a material's current white or black ResColor, handling both byte and float storage.
+unsafe fn read_material_color(material: &Material, color_type: MaterialColorType) -> ResColor {
+    let (flag_bit, idx) = if color_type == MaterialColorType::BlackColor {
+        (MaterialFlags::BlackColorFloat as u8, 0usize)
+    } else {
+        (MaterialFlags::WhiteColorFloat as u8, 1usize)
+    };
+    if material.m_flag & (1 << flag_bit) != 0 {
+        // Float storage — values are in 0..255 range
+        let pp = material.m_colors.p_float_color;
+        let p = *pp.add(idx);
+        ResColor {
+            r: (*p.add(0)) as u8,
+            g: (*p.add(1)) as u8,
+            b: (*p.add(2)) as u8,
+            a: (*p.add(3)) as u8,
+        }
+    } else {
+        // Byte storage
+        let c = material.m_colors.byte_color[idx];
+        ResColor { r: c[0], g: c[1], b: c[2], a: c[3] }
+    }
+}
+
+/// Saved original material colors for panel bg panes (for bracket restore).
+/// [panel_idx][variant_idx] matching PANEL_BG_PANES layout.
+static mut ORIG_PANEL_WHITE: [[ResColor; 3]; 4] = [[ResColor { r: 255, g: 255, b: 255, a: 255 }; 3]; 4];
+static mut ORIG_PANEL_BLACK: [[ResColor; 3]; 4] = [[ResColor { r: 0, g: 0, b: 0, a: 0 }; 3]; 4];
+static mut PANEL_COLORS_SAVED: bool = false;
+
+/// Poll controller for team mode toggle and color cycling during CSS.
+/// Called from css_btn_rule_draw (draw hook) during CSS only.
+///
+/// Controls:
+///   X          — toggle Team/Solo mode
+///   ZR + D-Up  — cycle P1's team color (R→B→G→Y→R)
+///   ZR + D-Rt  — cycle P2's team color
+///   ZR + D-Dn  — cycle P3's team color
+///   ZR + D-Lt  — cycle P4's team color
+///
+/// Reads buttons from the background hid polling thread (works on cold boot).
+/// Falls through to Controller.just_down when available (after first training
+/// session) for lower-latency input.
+unsafe fn poll_css_team_toggle() {
+    // Cooldown prevents multi-fire from draw hook calling multiple times per frame.
+    static COOLDOWN: AtomicU32 = AtomicU32::new(0);
+    let cd = COOLDOWN.load(Ordering::Relaxed);
+    if cd > 0 {
+        COOLDOWN.store(cd - 1, Ordering::Relaxed);
+        return;
+    }
+
+    // Previous buttons for edge detection (maintained by draw hook, not bg thread).
+    static DRAW_PREV: AtomicU64 = AtomicU64::new(0);
+
+    // Try Controller first (lower latency, has hardware just_down).
+    let ctrl_addr = CONTROLLER_PTRS[0].load(Ordering::Relaxed);
+    let (just_x, just_dup, just_drt, just_ddn, just_dlt, held_zr);
+
+    if ctrl_addr != 0 {
+        let c = &*(ctrl_addr as *const Controller);
+        just_x = c.just_down.x();
+        just_dup = c.just_down.dpad_up();
+        just_drt = c.just_down.dpad_right();
+        just_ddn = c.just_down.dpad_down();
+        just_dlt = c.just_down.dpad_left();
+        held_zr = c.current_buttons.zr();
+    } else {
+        // Background thread nn::hid polling — works on cold boot.
+        ensure_hid_poll_thread();
+        let current = HID_POLL_CURRENT.load(Ordering::Relaxed);
+        let prev = DRAW_PREV.swap(current, Ordering::Relaxed);
+        let just = current & !prev;
+        just_x = just & HID_X != 0;
+        just_dup = just & HID_DPAD_UP != 0;
+        just_drt = just & HID_DPAD_RIGHT != 0;
+        just_ddn = just & HID_DPAD_DOWN != 0;
+        just_dlt = just & HID_DPAD_LEFT != 0;
+        held_zr = current & HID_ZR != 0;
+    }
+
+    // X button: toggle team mode + re-layout CSS panels.
+    if just_x {
+        let new_val = !TEAM_MODE.load(Ordering::Relaxed);
+        TEAM_MODE.store(new_val, Ordering::Relaxed);
+        COOLDOWN.store(10, Ordering::Relaxed);
+        let scene = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
+        let orig_addr = PANEL_LAYOUT_ORIG_FN.load(Ordering::Relaxed);
+        if scene != 0 && orig_addr != 0 {
+            let scene_ptr = scene as *mut u8;
+            let mode_ptr = scene_ptr.add(0x16C) as *mut u32;
+            let arg2 = PANEL_LAYOUT_LAST_ARG2.load(Ordering::Relaxed);
+            // Set mode byte and re-invoke the original layout function directly.
+            // 0x6 = smash-like (team flags visible), 0xB = training CSS mode.
+            let new_mode: u32 = if new_val { 0x6 } else { 0xB };
+            core::ptr::write_volatile(mode_ptr, new_mode);
+            type PanelLayoutFn = unsafe extern "C" fn(*mut u8, u32, u32);
+            let orig_fn: PanelLayoutFn = core::mem::transmute(orig_addr);
+            let slots: u32 = if new_val { 4 } else { 4 };
+            orig_fn(scene_ptr, slots, arg2);
+            debug_log(&format!(
+                "CSS team toggle: team_mode={}, mode={:#x}, relayout {} slots",
+                new_val, new_mode, slots
+            ));
+        } else {
+            debug_log(&format!("CSS team toggle: team_mode={} (no scene/orig)", new_val));
+        }
+        return;
+    }
+
+    // Color cycling (only when team mode is ON).
+    if !TEAM_MODE.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // ZR held + D-pad: cycle individual player's team color.
+    if held_zr {
+        let dirs = [just_dup, just_drt, just_ddn, just_dlt];
+        let names = ["R", "B", "G", "Y"];
+        for (i, &pressed) in dirs.iter().enumerate() {
+            if pressed {
+                let old = TEAM_COLORS[i].load(Ordering::Relaxed);
+                let new_color = (old + 1) % 4;
+                TEAM_COLORS[i].store(new_color, Ordering::Relaxed);
+                COOLDOWN.store(10, Ordering::Relaxed);
+                debug_log(&format!(
+                    "CSS team color: P{} → {}",
+                    i + 1, names[new_color as usize]
+                ));
+            }
+        }
+    }
+}
+
 /// Set by lua_ai_path_hook when it detects that the upcoming FUN_71002c9900
 /// call is for an override character whose NSS module is not loaded.
 /// Consumed (cleared) immediately by lua_ai_init_hook.
@@ -970,6 +1410,374 @@ unsafe fn is_panel_random(player_index: usize) -> bool {
     db_index_from_hash(hash) == 0
 }
 
+/// Recursively search for a pane with the given name within the subtree rooted at `root`.
+/// Returns a mutable pointer to the first matching pane, or null.
+unsafe fn find_pane_by_name(root: *const Pane, name: &str) -> *mut Pane {
+    use skyline::nn::ui2d::PaneNode;
+    if root.is_null() {
+        return core::ptr::null_mut();
+    }
+    let pane_name = skyline::from_c_str((*root).name.as_ptr());
+    if pane_name == name {
+        return root as *mut Pane;
+    }
+    let sentinel = &(*root).children_list as *const PaneNode as *mut PaneNode;
+    let mut current = (*root).children_list.next;
+    let mut count = 0u32;
+    while current != sentinel && count < 500 {
+        let child = (current as *const u8).sub(0x08) as *const Pane;
+        let result = find_pane_by_name(child, name);
+        if !result.is_null() {
+            return result;
+        }
+        current = (*current).next;
+        count += 1;
+    }
+    core::ptr::null_mut()
+}
+
+/// Cached pane pointers for the per-panel team flag hierarchy.
+/// Populated once per CSS session by `cache_flag_panes`, cleared when
+/// CSS_TRAINING_SCENE_PTR changes.
+///
+/// Per-panel flag hierarchy (confirmed via deep dump):
+///   team → flag_pos → set_btn_flag_team (vis=0!) → btn_all → btn_size →
+///     flag_sd, flag_line (vis=0), flag_color (vis=0),
+///     color_r (a=0), color_b (a=0), color_g (a=0), color_y (a=0)
+///
+/// To show a flag: set_btn_flag_team vis=1, flag_line vis=1, flag_color vis=1,
+/// team alpha=255, then set the desired color_X alpha=255 (others 0).
+struct PanelFlagPanes {
+    team: *mut Pane,
+    flag_pos: *mut Pane,
+    set_btn_flag_team: *mut Pane,
+    btn_all: *mut Pane,
+    btn_size: *mut Pane,
+    flag_line: *mut Pane,
+    flag_color: *mut Pane,
+    flag_sd: *mut Pane,
+    color_r: *mut Pane,
+    color_b: *mut Pane,
+    color_g: *mut Pane,
+    color_y: *mut Pane,
+}
+
+impl PanelFlagPanes {
+    const fn null() -> Self {
+        Self {
+            team: core::ptr::null_mut(),
+            flag_pos: core::ptr::null_mut(),
+            set_btn_flag_team: core::ptr::null_mut(),
+            btn_all: core::ptr::null_mut(),
+            btn_size: core::ptr::null_mut(),
+            flag_line: core::ptr::null_mut(),
+            flag_color: core::ptr::null_mut(),
+            flag_sd: core::ptr::null_mut(),
+            color_r: core::ptr::null_mut(),
+            color_b: core::ptr::null_mut(),
+            color_g: core::ptr::null_mut(),
+            color_y: core::ptr::null_mut(),
+        }
+    }
+}
+
+// Only written/read from the draw hook (single thread).
+static mut FLAG_PANE_CACHE: [PanelFlagPanes; 4] = [
+    PanelFlagPanes::null(), PanelFlagPanes::null(),
+    PanelFlagPanes::null(), PanelFlagPanes::null(),
+];
+/// Cached "Training" text pane (TextBox) — set to "Team Training" when active.
+static mut TRAINING_TEXT_PANE: *mut Pane = core::ptr::null_mut();
+/// Cached panel background panes for team coloring — 3 size variants per panel:
+/// [0] = _l (large, ≤2 slots), [1] = _m (medium), [2] = _s (small, 3+ slots).
+/// Game shows/hides variants based on player count; we tint all found.
+static mut PANEL_BG_PANES: [[*mut Pane; 3]; 4] = [[core::ptr::null_mut(); 3]; 4];
+static FLAG_CACHE_SCENE: AtomicUsize = AtomicUsize::new(0);
+
+/// Log immediate children of a pane (for diagnostics).
+unsafe fn dump_children(parent: *const Pane, label: &str) {
+    use skyline::nn::ui2d::PaneNode;
+    if parent.is_null() { return; }
+    let sentinel = &(*parent).children_list as *const PaneNode as *mut PaneNode;
+    let mut current = (*parent).children_list.next;
+    let mut names = String::new();
+    let mut count = 0u32;
+    while current != sentinel && count < 100 {
+        let child = (current as *const u8).sub(0x08) as *const Pane;
+        let name = skyline::from_c_str((*child).name.as_ptr());
+        if !names.is_empty() { names.push_str(", "); }
+        names.push_str(&name);
+        current = (*current).next;
+        count += 1;
+    }
+    debug_log(&format!("{}: [{}]", label, names));
+}
+
+/// Log pane tree at depth 0..max_depth (for diagnostics).
+unsafe fn dump_pane_tree(pane: *const Pane, depth: u32, max_depth: u32) {
+    use skyline::nn::ui2d::PaneNode;
+    if pane.is_null() || depth > max_depth { return; }
+    let name = skyline::from_c_str((*pane).name.as_ptr());
+    let indent = "  ".repeat(depth as usize);
+    debug_log(&format!(
+        "{}[{}] sz=({:.0},{:.0}) pos=({:.0},{:.0})",
+        indent, name, (*pane).size_x, (*pane).size_y, (*pane).pos_x, (*pane).pos_y,
+    ));
+    let sentinel = &(*pane).children_list as *const PaneNode as *mut PaneNode;
+    let mut current = (*pane).children_list.next;
+    let mut count = 0u32;
+    while current != sentinel && count < 200 {
+        let child = (current as *const u8).sub(0x08) as *const Pane;
+        dump_pane_tree(child, depth + 1, max_depth);
+        current = (*current).next;
+        count += 1;
+    }
+}
+
+/// Populate FLAG_PANE_CACHE by searching the pane tree once.
+/// Also caches the "Training" text pane and panel background panes.
+unsafe fn cache_flag_panes(root_pane: *const Pane) {
+    // Search for "Training" text pane — try common CSS text pane names.
+    TRAINING_TEXT_PANE = core::ptr::null_mut();
+    for name in &["txt_rule_name", "txt_training", "txt_rule", "txt_mode",
+                   "txt_melee_type", "txt_title", "txt_melee"] {
+        let p = find_pane_by_name(root_pane, name);
+        if !p.is_null() {
+            TRAINING_TEXT_PANE = p;
+            debug_log(&format!("Found training text pane: '{}'", name));
+            break;
+        }
+    }
+    if TRAINING_TEXT_PANE.is_null() {
+        debug_log("WARNING: could not find training text pane (tried common names)");
+    }
+
+    let panel_names = ["set_panel_1p", "set_panel_2p", "set_panel_3p", "set_panel_4p"];
+    for (i, pn) in panel_names.iter().enumerate() {
+        let panel = find_pane_by_name(root_pane, pn);
+        if panel.is_null() { continue; }
+
+        // Cache panel color window panes — 3 size variants (l/m/s).
+        // Game shows _l when ≤2 slots, _s when 3+. We tint all found.
+        let variant_names = ["window_l_color_l", "window_l_color_m", "window_l_color_s"];
+        for (vi, vname) in variant_names.iter().enumerate() {
+            let color_win = find_pane_by_name(panel as *const Pane, vname);
+            PANEL_BG_PANES[i][vi] = color_win;
+            if !color_win.is_null() {
+                // Picture-compatible layout (material ptr at Pane+0).
+                let picture = (&mut *color_win).as_picture();
+                let material = &*picture.material;
+                ORIG_PANEL_WHITE[i][vi] = read_material_color(material, MaterialColorType::WhiteColor);
+                ORIG_PANEL_BLACK[i][vi] = read_material_color(material, MaterialColorType::BlackColor);
+            }
+        }
+        if i == 0 {
+            let found: Vec<&str> = variant_names.iter().enumerate()
+                .filter(|(vi, _)| !PANEL_BG_PANES[0][*vi].is_null())
+                .map(|(_, n)| *n)
+                .collect();
+            debug_log(&format!("Panel bg panes found in set_panel_1p: {:?}", found));
+        }
+        PANEL_COLORS_SAVED = true;
+
+        let team = find_pane_by_name(panel as *const Pane, "team");
+        if team.is_null() { continue; }
+        let flag_pos = find_pane_by_name(team as *const Pane, "flag_pos");
+        let btn = find_pane_by_name(team as *const Pane, "set_btn_flag_team");
+        if btn.is_null() { continue; }
+        let btn_all = find_pane_by_name(btn as *const Pane, "btn_all");
+        let btn_size = if !btn_all.is_null() {
+            find_pane_by_name(btn_all as *const Pane, "btn_size")
+        } else {
+            core::ptr::null_mut()
+        };
+        FLAG_PANE_CACHE[i] = PanelFlagPanes {
+            team,
+            flag_pos,
+            set_btn_flag_team: btn,
+            btn_all,
+            btn_size,
+            flag_line: find_pane_by_name(btn as *const Pane, "flag_line"),
+            flag_color: find_pane_by_name(btn as *const Pane, "flag_color"),
+            flag_sd: find_pane_by_name(btn as *const Pane, "flag_sd"),
+            color_r: find_pane_by_name(btn as *const Pane, "color_r"),
+            color_b: find_pane_by_name(btn as *const Pane, "color_b"),
+            color_g: find_pane_by_name(btn as *const Pane, "color_g"),
+            color_y: find_pane_by_name(btn as *const Pane, "color_y"),
+        };
+    }
+}
+
+/// Per-player team color assignment. 0=red, 1=blue, 2=green, 3=yellow.
+/// Default: P1/P3 = red(0), P2/P4 = blue(1).
+static TEAM_COLORS: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(1), AtomicU32::new(0), AtomicU32::new(1),
+];
+
+/// Called from handle_draw for every layout each frame.
+/// During training CSS on `chara_select_base`, shows/hides team flag panes
+/// based on the current TEAM_MODE state, scales flags, updates "Training"
+/// text, and tints panel backgrounds to match team colors.
+pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
+    if layout_name != "chara_select_base" {
+        return;
+    }
+
+    let scene = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
+    if scene == 0 {
+        return;
+    }
+
+    // Poll P1 controller for team mode toggle (X button).
+    poll_css_team_toggle();
+
+    // Cache pane pointers once per CSS session.
+    if FLAG_CACHE_SCENE.load(Ordering::Relaxed) != scene {
+        FLAG_CACHE_SCENE.store(scene, Ordering::Relaxed);
+        PANEL_COLORS_SAVED = false;
+        cache_flag_panes(root_pane as *const Pane);
+        debug_log(&format!(
+            "css_flags: cached panes for scene {:#x} (team[0]={:?})",
+            scene, FLAG_PANE_CACHE[0].team
+        ));
+    }
+
+    let team_mode = TEAM_MODE.load(Ordering::Relaxed);
+
+    // Keep vanilla is_team_battle() in sync during CSS.
+    sync_team_battle_flag();
+
+    // TODO: "Training" → "Team Training" text change disabled.
+    // txt_title was found but as_textbox().set_text_string() crashes — likely
+    // the TextBox buffer is too small for the longer string, or txt_title
+    // isn't actually a TextBox type. Need to check pane type + buffer capacity.
+
+    for i in 0..4 {
+        let fp = &FLAG_PANE_CACHE[i];
+        if fp.team.is_null() { continue; }
+
+        let color = TEAM_COLORS[i].load(Ordering::Relaxed);
+
+        if team_mode {
+            // Show flag: force visibility + alpha on every pane in the chain.
+            (*fp.team).alpha = 255;
+            (*fp.team).global_alpha = 255;
+            for p in [fp.flag_pos, fp.set_btn_flag_team, fp.btn_all, fp.btn_size,
+                       fp.flag_sd, fp.flag_line, fp.flag_color] {
+                if !p.is_null() {
+                    (*p).flags |= 1;
+                    (*p).alpha = 255;
+                    (*p).global_alpha = 255;
+                }
+            }
+
+            // Scale flags 33% larger.
+            if !fp.set_btn_flag_team.is_null() {
+                (*fp.set_btn_flag_team).scale_x = 1.33;
+                (*fp.set_btn_flag_team).scale_y = 1.33;
+            }
+
+            // Set the correct team color pane visible + opaque, others invisible.
+            let colors = [fp.color_r, fp.color_b, fp.color_g, fp.color_y];
+            for (ci, cp) in colors.iter().enumerate() {
+                if !cp.is_null() {
+                    if ci as u32 == color {
+                        (**cp).flags |= 1;
+                        (**cp).alpha = 255;
+                        (**cp).global_alpha = 255;
+                    } else {
+                        (**cp).flags &= !1;
+                        (**cp).alpha = 0;
+                        (**cp).global_alpha = 0;
+                    }
+                }
+            }
+
+            // Tint the flag_color background to match the team color.
+            if !fp.flag_color.is_null() {
+                let (white, black) = TEAM_FLAG_COLORS[color.min(3) as usize];
+                let picture = (&mut *fp.flag_color).as_picture();
+                let material = &mut *picture.material;
+                material.set_white_res_color(white);
+                material.set_black_res_color(black);
+            }
+
+            // Tint all panel bg variants via material colors (bracket approach).
+            // We set team colors here BEFORE draw; css_post_draw() restores
+            // originals AFTER original!() so shared materials don't persist.
+            let (white, black) = TEAM_FLAG_COLORS[color.min(3) as usize];
+            for vi in 0..3 {
+                let bg = PANEL_BG_PANES[i][vi];
+                if !bg.is_null() {
+                    let picture = (&mut *bg).as_picture();
+                    let material = &mut *picture.material;
+                    material.set_white_res_color(white);
+                    material.set_black_res_color(black);
+                }
+            }
+        } else {
+            // Hide flags: restore vanilla hidden state.
+            (*fp.team).alpha = 0;
+            (*fp.team).global_alpha = 0;
+            if !fp.set_btn_flag_team.is_null() {
+                (*fp.set_btn_flag_team).flags &= !1;
+                (*fp.set_btn_flag_team).scale_x = 1.0;
+                (*fp.set_btn_flag_team).scale_y = 1.0;
+            }
+            // Restore all panel bg variants to saved originals.
+            if PANEL_COLORS_SAVED {
+                for vi in 0..3 {
+                    let bg = PANEL_BG_PANES[i][vi];
+                    if !bg.is_null() {
+                        let picture = (&mut *bg).as_picture();
+                        let material = &mut *picture.material;
+                        material.set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
+                        material.set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Called from handle_draw AFTER original!() to restore shared material colors.
+/// This is the second half of the bracket: css_btn_rule_draw sets team colors,
+/// original!() draws everything, then this restores originals so the shared
+/// material doesn't persist team tinting to other panes (e.g., portraits).
+pub unsafe fn css_post_draw(layout_name: &str) {
+    if layout_name != "chara_select_base" {
+        return;
+    }
+    if !TEAM_MODE.load(Ordering::Relaxed) || !PANEL_COLORS_SAVED {
+        return;
+    }
+    for i in 0..4 {
+        for vi in 0..3 {
+            let bg = PANEL_BG_PANES[i][vi];
+            if !bg.is_null() {
+                let picture = (&mut *bg).as_picture();
+                let material = &mut *picture.material;
+                material.set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
+                material.set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
+            }
+        }
+    }
+}
+
+/// Hook the btn_rule button handler on the CSS. Vanilla manages the Solo/Team
+/// toggle animation; we intercept its return value to flip our TEAM_MODE flag.
+/// Returns 1 when a toggle completes, 0 otherwise.
+#[skyline::hook(offset = OFFSET_BTN_RULE_HANDLER)]
+pub unsafe fn btn_rule_handler_hook(scene_obj: *mut u8) -> u64 {
+    let result = call_original!(scene_obj);
+    if result == 1 {
+        let new_val = !TEAM_MODE.load(Ordering::Relaxed);
+        TEAM_MODE.store(new_val, Ordering::Relaxed);
+        debug_log(&format!("btn_rule toggle: team_mode = {}", new_val));
+    }
+    result
+}
+
 /// Hook the CSS setup function to expand training mode from 2 to 4 player slots.
 /// When doubles is enabled (teammate_slot != None), patches the mode_params struct
 /// so the CSS allocates UI for 4 players instead of the default 2.
@@ -1043,8 +1851,20 @@ unsafe fn cache_panel_ptrs(scene: *const u8) {
     }
 }
 
+/// Stored original panel layout fn pointer for re-invocation from toggle.
+static PANEL_LAYOUT_ORIG_FN: AtomicUsize = AtomicUsize::new(0);
+/// Last arg2 seen in panel layout hook (needed for re-invocation).
+static PANEL_LAYOUT_LAST_ARG2: AtomicU32 = AtomicU32::new(0);
+
 #[skyline::hook(offset = OFFSET_CSS_PANEL_LAYOUT)]
 pub unsafe fn css_panel_layout_hook(scene: *mut u8, slot_count: u32, arg2: u32) {
+    // Save original fn pointer on first call for re-invocation from toggle.
+    if PANEL_LAYOUT_ORIG_FN.load(Ordering::Relaxed) == 0 {
+        let f = original!();
+        PANEL_LAYOUT_ORIG_FN.store(f as usize, Ordering::Relaxed);
+    }
+    PANEL_LAYOUT_LAST_ARG2.store(arg2, Ordering::Relaxed);
+
     if !scene.is_null() {
         let mode_ptr = scene.add(0x16C) as *mut u32;
         let mode = core::ptr::read_volatile(mode_ptr);
@@ -1329,21 +2149,39 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         let config_type = core::ptr::read_volatile(config.add(0x78) as *const i32);
         let is_entry1_human = config_type == 0;
         CSS_ENTRY_IS_HUMAN[1].store(is_entry1_human, Ordering::Relaxed);
-        // Save tag/profile index for entry 1 — the game populates config[0x214] correctly.
-        let entry1_tag = core::ptr::read_volatile(config.add(0x214) as *const u32);
+        // Read tag/profile index — prefer CSS panel (config may have P1's tag
+        // from the shared buffer), fall back to config[0x214].
+        let config_tag = core::ptr::read_volatile(config.add(0x214) as *const u32);
+        let panel_tag = read_css_panel_tag(1);
+        let entry1_tag = if panel_tag > 0 || is_entry1_human { panel_tag } else { config_tag };
         HUMAN_ENTRY_TAG[1].store(entry1_tag, Ordering::Relaxed);
 
         if is_entry1_human {
-            // config[0x7C] is correct for entry 1 — the game populates P2's
-            // npad properly (unlike entries 2/3 which are cloned from CPU1).
-            let entry1_npad = core::ptr::read_volatile(config.add(0x7C) as *const i32);
+            // config[0x7C] is NOT reliable for entry 1 — the game reuses a
+            // shared config buffer and may leave P1's npad (0) here instead of
+            // P2's actual npad. Read from CSS panel like entries 2/3.
+            let config_npad = core::ptr::read_volatile(config.add(0x7C) as *const i32);
+            let panel_npad = read_css_panel_npad(1);
+            let fim_npad = FIM_NPAD_FOR_ENTRY[1].load(Ordering::Relaxed);
+            let entry1_npad = if panel_npad >= 0 {
+                panel_npad
+            } else if fim_npad >= 0 {
+                fim_npad
+            } else if config_npad >= 0 {
+                config_npad // last resort: trust config
+            } else {
+                1 // fallback
+            };
+            // Write corrected npad back to config so the game's clone_write
+            // original uses the right controller binding.
+            core::ptr::write_volatile(config.add(0x7C) as *mut i32, entry1_npad);
             HUMAN_ENTRY_NPAD[1].store(entry1_npad, Ordering::Relaxed);
             if entry1_npad >= 0 && entry1_npad < 8 {
                 NPAD_TO_ENTRY[entry1_npad as usize].store(1, Ordering::Relaxed);
             }
             debug_log(&format!(
-                "clone_write: entry=1 HUMAN npad={} (from config[0x7C])",
-                entry1_npad
+                "clone_write: entry=1 HUMAN npad={} (panel={} fim={} config={})",
+                entry1_npad, panel_npad, fim_npad, config_npad
             ));
         } else {
             // CPU P2: force npad to -1 so its CMI controller_index won't

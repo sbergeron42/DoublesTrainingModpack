@@ -77,6 +77,7 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     }
 
     damage::draw(root_pane, &layout_name);
+    crate::training::doubles::css_btn_rule_draw(root_pane, &layout_name);
 
     if layout_name == "info_training" {
         frame_counter::tick_real();
@@ -86,6 +87,9 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     }
 
     original!()(layout, draw_info, cmd_buffer);
+
+    // Bracket restore: undo team color tinting on shared materials after draw.
+    crate::training::doubles::css_post_draw(&layout_name);
 }
 
 // Allocate a static amount of memory that Smash isn't allowed to deallocate,
