@@ -9,7 +9,7 @@ use crate::training::frame_counter;
 use crate::training::ui::notifications;
 use crate::try_get_module_accessor;
 
-use training_mod_consts::{FighterId, OnOff, MENU};
+use training_mod_consts::{current_profile, FighterId, OnOff, MENU};
 use training_mod_sync::*;
 
 static PLAYER_WAS_ACTIONABLE: RwLock<bool> = RwLock::new(false);
@@ -71,7 +71,7 @@ pub unsafe fn once_per_frame(module_accessor: &mut BattleObjectModuleAccessor) {
     // Skip the CPU so we don't run twice per frame
     // Also skip if the CPU is set to mash since that interferes with the frame calculation
     let entry_id_int = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
-    if entry_id_int != (FighterId::Player as i32) || read(&MENU).mash_state != Action::empty() {
+    if entry_id_int != (FighterId::Player as i32) || current_profile().mash_state != Action::empty() {
         return;
     }
     let player_module_accessor = try_get_module_accessor(FighterId::Player)

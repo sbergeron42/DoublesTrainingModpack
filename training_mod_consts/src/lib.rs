@@ -2,6 +2,7 @@
 extern crate byteflags;
 extern crate num_derive;
 
+use core::sync::atomic::{AtomicI32, Ordering};
 use serde::{Deserialize, Serialize};
 
 pub mod options;
@@ -16,9 +17,12 @@ use training_mod_tui::SubMenuType::*;
 pub use training_mod_tui::*;
 
 pub const TOGGLE_MAX: u8 = 5;
+pub const MAX_PROFILES: usize = 8;
+pub const MAX_CPU_SLOTS: usize = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+#[serde(default)]
 pub struct TrainingModpackMenu {
     pub aerial_delay: Delay,
     pub air_dodge_dir: Direction,
@@ -96,6 +100,18 @@ pub struct TrainingModpackMenu {
     pub update_policy: UpdatePolicy,
     pub lra_reset: OnOff,
     pub teammate_slot: TeammateSlot,
+    #[serde(default)]
+    pub cpu_profile_assign: [u8; MAX_CPU_SLOTS],
+}
+
+impl Default for TrainingModpackMenu {
+    fn default() -> Self {
+        BASE_MENU
+    }
+}
+
+fn default_profiles() -> [CpuProfile; MAX_PROFILES] {
+    [BASE_PROFILE; MAX_PROFILES]
 }
 
 #[repr(C)]
@@ -103,6 +119,10 @@ pub struct TrainingModpackMenu {
 pub struct MenuJsonStruct {
     pub menu: TrainingModpackMenu,
     pub defaults_menu: TrainingModpackMenu,
+    #[serde(default = "default_profiles")]
+    pub profiles: [CpuProfile; MAX_PROFILES],
+    #[serde(default = "default_profiles")]
+    pub default_profiles: [CpuProfile; MAX_PROFILES],
 }
 
 #[repr(i32)]
@@ -207,15 +227,206 @@ pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {
     update_policy: UpdatePolicy::default(),
     lra_reset: OnOff::ON,
     teammate_slot: TeammateSlot::NONE,
+    cpu_profile_assign: [0; MAX_CPU_SLOTS],
 };
 
 pub static DEFAULTS_MENU: RwLock<TrainingModpackMenu> = RwLock::new(BASE_MENU);
 pub static MENU: RwLock<TrainingModpackMenu> = RwLock::new(BASE_MENU);
 
+// --- Per-CPU Profile System ---
+
+#[repr(C)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+pub struct CpuProfile {
+    // --- Mash Settings ---
+    pub mash_state: Action,
+    pub follow_up: Action,
+    pub mash_triggers: MashTrigger,
+    pub attack_angle: AttackAngle,
+    pub throw_state: ThrowOption,
+    pub throw_delay: MedDelay,
+    pub pummel_delay: MedDelay,
+    pub falling_aerials: BoolFlag,
+    pub full_hop: BoolFlag,
+    pub aerial_delay: Delay,
+    pub fast_fall: BoolFlag,
+    pub fast_fall_delay: Delay,
+    pub oos_offset: Delay,
+    pub reaction_time: Delay,
+    // --- Override Settings ---
+    pub ledge_neutral_override: Action,
+    pub ledge_roll_override: Action,
+    pub ledge_jump_override: Action,
+    pub ledge_attack_override: Action,
+    pub tech_action_override: Action,
+    pub clatter_override: Action,
+    pub tumble_override: Action,
+    pub hitstun_override: Action,
+    pub parry_override: Action,
+    pub shieldstun_override: Action,
+    pub footstool_override: Action,
+    pub landing_override: Action,
+    pub trump_override: Action,
+    // --- Defensive Settings ---
+    pub air_dodge_dir: Direction,
+    pub di_state: Direction,
+    pub sdi_state: Direction,
+    pub sdi_strength: SdiFrequency,
+    pub clatter_strength: ClatterFrequency,
+    pub ledge_state: LedgeOption,
+    pub ledge_delay: LongDelay,
+    pub tech_state: TechFlags,
+    pub miss_tech_state: MissTechFlags,
+    pub shield_state: Shield,
+    pub shield_tilt: Direction,
+    pub crouch: OnOff,
+    pub stale_dodges: OnOff,
+    pub tech_hide: OnOff,
+    pub buff_state: BuffOption,
+    pub playback_mash: OnOff,
+    // --- Save State (per-CPU) ---
+    pub save_damage_cpu: SaveDamage,
+    pub save_damage_limits_cpu: DamagePercent,
+}
+
+pub static BASE_PROFILE: CpuProfile = CpuProfile {
+    mash_state: Action::empty(),
+    follow_up: Action::empty(),
+    mash_triggers: MashTrigger::default(),
+    attack_angle: AttackAngle::empty(),
+    throw_state: ThrowOption::NONE,
+    throw_delay: MedDelay::empty(),
+    pummel_delay: MedDelay::empty(),
+    falling_aerials: BoolFlag::FALSE,
+    full_hop: BoolFlag::TRUE,
+    aerial_delay: Delay::empty(),
+    fast_fall: BoolFlag::FALSE,
+    fast_fall_delay: Delay::empty(),
+    oos_offset: Delay::empty(),
+    reaction_time: Delay::empty(),
+    ledge_neutral_override: Action::empty(),
+    ledge_roll_override: Action::empty(),
+    ledge_jump_override: Action::empty(),
+    ledge_attack_override: Action::empty(),
+    tech_action_override: Action::empty(),
+    clatter_override: Action::empty(),
+    tumble_override: Action::empty(),
+    hitstun_override: Action::empty(),
+    parry_override: Action::empty(),
+    shieldstun_override: Action::empty(),
+    footstool_override: Action::empty(),
+    landing_override: Action::empty(),
+    trump_override: Action::empty(),
+    air_dodge_dir: Direction::empty(),
+    di_state: Direction::empty(),
+    sdi_state: Direction::empty(),
+    sdi_strength: SdiFrequency::NONE,
+    clatter_strength: ClatterFrequency::NONE,
+    ledge_state: LedgeOption::default(),
+    ledge_delay: LongDelay::empty(),
+    tech_state: TechFlags::all(),
+    miss_tech_state: MissTechFlags::all(),
+    shield_state: Shield::NONE,
+    shield_tilt: Direction::empty(),
+    crouch: OnOff::OFF,
+    stale_dodges: OnOff::ON,
+    tech_hide: OnOff::OFF,
+    buff_state: BuffOption::empty(),
+    playback_mash: OnOff::ON,
+    save_damage_cpu: SaveDamage::DEFAULT,
+    save_damage_limits_cpu: DamagePercent::default(),
+};
+
+impl Default for CpuProfile {
+    fn default() -> Self {
+        BASE_PROFILE
+    }
+}
+
+pub static PROFILES: RwLock<[CpuProfile; MAX_PROFILES]> =
+    RwLock::new([BASE_PROFILE; MAX_PROFILES]);
+pub static DEFAULT_PROFILES: RwLock<[CpuProfile; MAX_PROFILES]> =
+    RwLock::new([BASE_PROFILE; MAX_PROFILES]);
+
+pub static CURRENT_CPU_ENTRY_ID: AtomicI32 = AtomicI32::new(1);
+
+/// Get the profile for a given CPU entry ID (1-3).
+/// Always reads from PROFILES. Migration at load time ensures profiles
+/// are populated from old MENU settings if needed.
+pub fn get_cpu_profile(entry_id: i32) -> CpuProfile {
+    if entry_id < 1 || entry_id > MAX_CPU_SLOTS as i32 {
+        return read(&PROFILES)[0];
+    }
+    let idx = read(&MENU).cpu_profile_assign[(entry_id - 1) as usize] as usize;
+    if idx >= MAX_PROFILES {
+        return read(&PROFILES)[0];
+    }
+    read(&PROFILES)[idx]
+}
+
+/// Get the profile for the current CPU being processed this frame.
+pub fn current_profile() -> CpuProfile {
+    get_cpu_profile(CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed))
+}
+
+/// Construct a CpuProfile from MENU fields (used for migration from old format).
+pub fn profile_from_menu() -> CpuProfile {
+    let m = read(&MENU);
+    CpuProfile {
+        mash_state: m.mash_state,
+        follow_up: m.follow_up,
+        mash_triggers: m.mash_triggers,
+        attack_angle: m.attack_angle,
+        throw_state: m.throw_state,
+        throw_delay: m.throw_delay,
+        pummel_delay: m.pummel_delay,
+        falling_aerials: m.falling_aerials,
+        full_hop: m.full_hop,
+        aerial_delay: m.aerial_delay,
+        fast_fall: m.fast_fall,
+        fast_fall_delay: m.fast_fall_delay,
+        oos_offset: m.oos_offset,
+        reaction_time: m.reaction_time,
+        ledge_neutral_override: m.ledge_neutral_override,
+        ledge_roll_override: m.ledge_roll_override,
+        ledge_jump_override: m.ledge_jump_override,
+        ledge_attack_override: m.ledge_attack_override,
+        tech_action_override: m.tech_action_override,
+        clatter_override: m.clatter_override,
+        tumble_override: m.tumble_override,
+        hitstun_override: m.hitstun_override,
+        parry_override: m.parry_override,
+        shieldstun_override: m.shieldstun_override,
+        footstool_override: m.footstool_override,
+        landing_override: m.landing_override,
+        trump_override: m.trump_override,
+        air_dodge_dir: m.air_dodge_dir,
+        di_state: m.di_state,
+        sdi_state: m.sdi_state,
+        sdi_strength: m.sdi_strength,
+        clatter_strength: m.clatter_strength,
+        ledge_state: m.ledge_state,
+        ledge_delay: m.ledge_delay,
+        tech_state: m.tech_state,
+        miss_tech_state: m.miss_tech_state,
+        shield_state: m.shield_state,
+        shield_tilt: m.shield_tilt,
+        crouch: m.crouch,
+        stale_dodges: m.stale_dodges,
+        tech_hide: m.tech_hide,
+        buff_state: m.buff_state,
+        playback_mash: m.playback_mash,
+        save_damage_cpu: m.save_damage_cpu,
+        save_damage_limits_cpu: m.save_damage_limits_cpu,
+    }
+}
+
 pub unsafe fn create_app<'a>() -> App<'a> {
     let mut overall_menu = App::new();
 
-    // Mash Tab
+    // ===== PROFILE TABS (per-CPU settings) =====
+
+    // Mash Tab (profile)
     let mut mash_tab_submenus: Vec<SubMenu> = Vec::new();
     mash_tab_submenus.push(Action::to_submenu(
         "Mash Toggles",
@@ -320,9 +531,9 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         title: "Mash Settings",
         submenus: StatefulTable::with_items(NX_SUBMENU_ROWS, NX_SUBMENU_COLUMNS, mash_tab_submenus),
     };
-    overall_menu.tabs.push(mash_tab);
+    overall_menu.profile_tabs.push(mash_tab);
 
-    // Mash Override Tab
+    // Override Tab (profile)
     let mut override_tab_submenus: Vec<SubMenu> = Vec::new();
     override_tab_submenus.push(Action::to_submenu(
         "Ledge Neutral Getup",
@@ -424,9 +635,9 @@ pub unsafe fn create_app<'a>() -> App<'a> {
             override_tab_submenus,
         ),
     };
-    overall_menu.tabs.push(override_tab);
+    overall_menu.profile_tabs.push(override_tab);
 
-    // Defensive Tab
+    // Defensive Tab (profile)
     let mut defensive_tab_submenus: Vec<SubMenu> = Vec::new();
     defensive_tab_submenus.push(Direction::to_submenu(
         "Airdodge Direction",
@@ -514,6 +725,34 @@ pub unsafe fn create_app<'a>() -> App<'a> {
     ));
     defensive_tab_submenus.push(OnOff::to_submenu("Dodge Staling", "stale_dodges", "Controls whether the CPU's dodges will worsen with repetitive use\n(Note: This can setting can cause combo behavior not possible in the original game)", ToggleSingle, false));
     defensive_tab_submenus.push(OnOff::to_submenu("Hide Tech Animations", "tech_hide", "Hides tech animations and effects after 7 frames to help with reacting to tech animation startup", ToggleSingle, false));
+    defensive_tab_submenus.push(BuffOption::to_submenu(
+        "Buff Options",
+        "buff_state",
+        "Buff(s) to be applied when loading a save state",
+        ToggleMultiple,
+        false,
+    ));
+    defensive_tab_submenus.push(OnOff::to_submenu(
+        "Playback Mash Interrupt",
+        "playback_mash",
+        "End input playback when a mash trigger occurs",
+        ToggleSingle,
+        false,
+    ));
+    defensive_tab_submenus.push(SaveDamage::to_submenu(
+        "Save Dmg (CPU)",
+        "save_damage_cpu",
+        "Should save states retain CPU damage",
+        ToggleSingle,
+        false,
+    ));
+    defensive_tab_submenus.push(DamagePercent::to_submenu(
+        "Dmg Range (CPU)",
+        "save_damage_limits_cpu",
+        "Limits on Random Damage to apply to the CPU when loading a save state",
+        Slider,
+        false,
+    ));
     let defensive_tab = Tab {
         id: "defensive",
         title: "Defensive Settings",
@@ -523,7 +762,14 @@ pub unsafe fn create_app<'a>() -> App<'a> {
             defensive_tab_submenus,
         ),
     };
-    overall_menu.tabs.push(defensive_tab);
+    overall_menu.profile_tabs.push(defensive_tab);
+
+    // Ensure profile tabs have first tab selected
+    if overall_menu.profile_tabs.state.selected().is_none() {
+        overall_menu.profile_tabs.state.select(Some(0));
+    }
+
+    // ===== ROOT TABS (global settings) =====
 
     // Input Recording Tab
     let mut input_recording_tab_submenus: Vec<SubMenu> = Vec::new();
@@ -575,13 +821,6 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         "Choose which slots to playback input recording upon loading a save state",
         ToggleMultiple,
         true,
-    ));
-    input_recording_tab_submenus.push(OnOff::to_submenu(
-        "Playback Mash Interrupt",
-        "playback_mash",
-        "End input playback when a mash trigger occurs",
-        ToggleSingle,
-        false,
     ));
     input_recording_tab_submenus.push(OnOff::to_submenu(
         "Playback Loop",
@@ -660,20 +899,6 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         false,
     ));
     save_state_tab_submenus.push(SaveDamage::to_submenu(
-        "Save Dmg (CPU)",
-        "save_damage_cpu",
-        "Should save states retain CPU damage",
-        ToggleSingle,
-        false,
-    ));
-    save_state_tab_submenus.push(DamagePercent::to_submenu(
-        "Dmg Range (CPU)",
-        "save_damage_limits_cpu",
-        "Limits on Random Damage to apply to the CPU when loading a save state",
-        Slider,
-        false,
-    ));
-    save_state_tab_submenus.push(SaveDamage::to_submenu(
         "Save Dmg (Player)",
         "save_damage_player",
         "Should save states retain player damage",
@@ -713,13 +938,6 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         "character_item",
         "The item to give to the player's fighter when loading a save state",
         ToggleSingle,
-        false,
-    ));
-    save_state_tab_submenus.push(BuffOption::to_submenu(
-        "Buff Options",
-        "buff_state",
-        "Buff(s) to be applied to the respective fighters when loading a save state",
-        ToggleMultiple,
         false,
     ));
     let save_state_tab = Tab {
@@ -819,7 +1037,7 @@ pub unsafe fn create_app<'a>() -> App<'a> {
     };
     overall_menu.tabs.push(doubles_tab);
 
-    // Ensure that a tab is always selected
+    // Ensure root tabs have first tab selected
     if overall_menu.tabs.get_selected().is_none() {
         overall_menu.tabs.state.select(Some(0));
     }

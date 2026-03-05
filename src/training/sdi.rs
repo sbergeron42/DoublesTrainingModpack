@@ -14,7 +14,7 @@ static DIRECTION: RwLock<Direction> = RwLock::new(Direction::NEUTRAL);
 // TODO! Bug - we only roll a new direction when loading a save state or on LRA reset
 pub fn roll_direction() {
     assign(&COUNTER, 0);
-    assign(&DIRECTION, read(&MENU).sdi_state.get_random());
+    assign(&DIRECTION, current_profile().sdi_state.get_random());
 }
 
 unsafe fn get_sdi_direction() -> Option<f64> {
@@ -38,7 +38,7 @@ pub unsafe fn check_hit_stop_delay_command(
     if !is_training_mode() || !is_operation_cpu(module_accessor) {
         return original!()(module_accessor, sdi_direction);
     }
-    let repeat = read(&MENU).sdi_strength.into_u32();
+    let repeat = current_profile().sdi_strength.into_u32();
     let mut counter_lock = lock_write(&COUNTER);
     *counter_lock = (*counter_lock + 1) % repeat;
     if *counter_lock == repeat - 1 {

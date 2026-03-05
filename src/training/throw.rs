@@ -45,7 +45,7 @@ fn roll_throw_delay() {
         // Only roll another throw delay if one is not already selected
         assign(
             &THROW_DELAY,
-            read(&MENU).throw_delay.get_random().into_meddelay(),
+            current_profile().throw_delay.get_random().into_meddelay(),
         );
     }
 }
@@ -55,7 +55,7 @@ fn roll_pummel_delay() {
         // Don't roll another pummel delay if one is already selected
         assign(
             &PUMMEL_DELAY,
-            read(&MENU).pummel_delay.get_random().into_meddelay(),
+            current_profile().pummel_delay.get_random().into_meddelay(),
         );
     }
 }
@@ -63,7 +63,7 @@ fn roll_pummel_delay() {
 fn roll_throw_case() {
     if read(&THROW_CASE) == ThrowOption::empty() {
         // Only re-roll if there is not already a throw option selected
-        assign(&THROW_CASE, read(&MENU).throw_state.get_random());
+        assign(&THROW_CASE, current_profile().throw_state.get_random());
     }
 }
 
@@ -112,7 +112,7 @@ pub unsafe fn get_command_flag_throw_direction(
         }
 
         // If no pummel delay is selected (default), then don't pummel
-        if read(&MENU).pummel_delay == MedDelay::empty() {
+        if current_profile().pummel_delay == MedDelay::empty() {
             return 0;
         }
 
@@ -131,7 +131,7 @@ pub unsafe fn get_command_flag_throw_direction(
         *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_THROW_HI,
     ) {
         let cmd = read(&THROW_CASE).into_cmd().unwrap_or(0);
-        mash::external_buffer_menu_mash(read(&MENU).mash_state.get_random());
+        mash::external_buffer_menu_mash(current_profile().mash_state.get_random());
         return cmd;
     }
 

@@ -9,7 +9,7 @@ static SHIELD_STICK_DIRECTION: RwLock<Direction> = RwLock::new(Direction::OUT);
 pub fn roll_direction() {
     assign(
         &SHIELD_STICK_DIRECTION,
-        read(&MENU).shield_tilt.get_random(),
+        current_profile().shield_tilt.get_random(),
     );
 }
 

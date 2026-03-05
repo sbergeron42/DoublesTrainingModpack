@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use skyline::nn::ui2d::*;
 use smash::ui2d::{SmashPane, SmashTextBox};
 use training_mod_tui::{
-    App, AppPage, ConfirmationState, SliderState, NX_SUBMENU_COLUMNS, NX_SUBMENU_ROWS,
+    App, AppPage, ConfirmationState, SliderState, MAX_CPU_SLOTS, NX_SUBMENU_COLUMNS,
+    NX_SUBMENU_ROWS,
 };
 
 use crate::common::menu::{
@@ -84,7 +85,8 @@ static PROCON_BUTTON_MAPPING: LazyLock<HashMap<&'static str, u16>> = LazyLock::n
 });
 
 unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
-    let tabs_clone = app.tabs.clone(); // Need this to avoid double-borrow later on
+    let root_tabs_clone = app.tabs.clone();
+    let profile_tabs_clone = app.profile_tabs.clone();
     let tab = app.selected_tab();
     for row in 0..NX_SUBMENU_ROWS {
         let menu_button_row = root_pane
@@ -113,7 +115,7 @@ unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
                 // Hide all icon images, and strategically mark the icon that
                 // corresponds with a particular button to be visible.
 
-                for t in tabs_clone.iter() {
+                for t in root_tabs_clone.iter().chain(profile_tabs_clone.iter()) {
                     for s in t.submenus.iter() {
                         let pane = menu_button.find_pane_by_name_recursive(s.id);
                         if let Some(p) = pane {
@@ -165,7 +167,8 @@ unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
 }
 
 unsafe fn render_toggle_page(app: &mut App, root_pane: &Pane) {
-    let tabs_clone = app.tabs.clone(); // Need this to avoid double-borrow later on
+    let root_tabs_clone = app.tabs.clone();
+    let profile_tabs_clone = app.profile_tabs.clone();
     let submenu = app.selected_submenu();
     // If the options can only be toggled on or off, then use the check icon
     // instead of the number icons
@@ -204,7 +207,7 @@ unsafe fn render_toggle_page(app: &mut App, root_pane: &Pane) {
                 }
 
                 // Hide all submenu icons, since we're not on the submenu page
-                for t in tabs_clone.iter() {
+                for t in root_tabs_clone.iter().chain(profile_tabs_clone.iter()) {
                     for s in t.submenus.iter() {
                         let pane = menu_button.find_pane_by_name_recursive(s.id);
                         if let Some(p) = pane {
@@ -413,7 +416,7 @@ unsafe fn render_confirmation_page(app: &mut App, root_pane: &Pane) {
 
                     // Hide all submenu icons, since we're not on the submenu page
                     // TODO: Do we want to show the check on "Yes" and a red "X" on "No?"
-                    for t in app.tabs.iter() {
+                    for t in app.tabs.iter().chain(app.profile_tabs.iter()) {
                         for s in t.submenus.iter() {
                             let pane = menu_button.find_pane_by_name_recursive(s.id);
                             if let Some(p) = pane {
@@ -425,6 +428,83 @@ unsafe fn render_confirmation_page(app: &mut App, root_pane: &Pane) {
             }
         }
     }
+}
+
+unsafe fn render_cpu_setup_page(app: &mut App, root_pane: &Pane) {
+    // Build list of active CPU entry indices (0-based, entry_id = idx+1)
+    let active_entries: Vec<usize> = (0..MAX_CPU_SLOTS)
+        .filter(|&i| app.cpu_is_active[i])
+        .collect();
+
+    let mut visible_row = 0usize;
+    for row in 0..NX_SUBMENU_ROWS {
+        let menu_button_row = root_pane
+            .find_pane_by_name_recursive_expect(format!("TrModMenuButtonRow{row}").as_str());
+
+        if visible_row < active_entries.len() && row == visible_row {
+            let entry_idx = active_entries[visible_row];
+            menu_button_row.set_visible(true);
+            for col in 0..NX_SUBMENU_COLUMNS {
+                let menu_button = menu_button_row
+                    .find_pane_by_name_recursive_expect(format!("Button{col}").as_str());
+                if col == 0 {
+                    menu_button.set_visible(true);
+                    let title_text = menu_button
+                        .find_pane_by_name_recursive_expect("TitleTxt")
+                        .as_textbox();
+                    let title_bg = menu_button
+                        .find_pane_by_name_recursive_expect("TitleBg")
+                        .as_picture();
+                    let title_bg_material = &mut *title_bg.material;
+
+                    let player_num = entry_idx + 2; // entry 0 = P2, entry 1 = P3, etc.
+                    let profile_idx = app.cpu_profile_assign[entry_idx];
+                    title_text.set_text_string(
+                        &format!("Player {} CPU: Profile {}", player_num, profile_idx + 1),
+                    );
+
+                    let is_selected = entry_idx == app.cpu_setup_row;
+                    if is_selected {
+                        title_bg_material.set_white_res_color(BG_LEFT_ON_WHITE_COLOR);
+                        title_bg_material.set_black_res_color(BG_LEFT_ON_BLACK_COLOR);
+                        title_text.text_shadow_enable(true);
+                        title_text.text_outline_enable(true);
+                        title_text.set_color(255, 255, 255, 255);
+                    } else {
+                        title_bg_material.set_white_res_color(BG_LEFT_OFF_WHITE_COLOR);
+                        title_bg_material.set_black_res_color(BG_LEFT_OFF_BLACK_COLOR);
+                        title_text.text_shadow_enable(false);
+                        title_text.text_outline_enable(false);
+                        title_text.set_color(178, 199, 211, 255);
+                    }
+
+                    // Hide icons
+                    menu_button
+                        .find_pane_by_name_recursive_expect("check")
+                        .set_visible(false);
+                    menu_button
+                        .find_pane_by_name_recursive_expect("Icon")
+                        .set_visible(false);
+                } else {
+                    menu_button.set_visible(false);
+                }
+            }
+            visible_row += 1;
+        } else {
+            menu_button_row.set_visible(false);
+        }
+    }
+
+    // Help text
+    let help = if active_entries.is_empty() {
+        "No CPUs detected | B Close"
+    } else {
+        "A Edit Profile | Left/Right Change Profile | B Close"
+    };
+    root_pane
+        .find_pane_by_name_recursive_expect("FooterTxt")
+        .as_textbox()
+        .set_text_string(help);
 }
 
 pub unsafe fn draw(root_pane: &Pane) {
@@ -499,17 +579,56 @@ pub unsafe fn draw(root_pane: &Pane) {
     let mut app = lock_write(&QUICK_MENU_APP);
     // We don't really need to change anything, but get_before_selected requires &mut self
 
-    let tab_titles = [
-        app.tabs
+    let tab_titles = if app.page == AppPage::CPU_SETUP {
+        // CPU Setup is the "current tab", root tabs adjacent
+        let last_root = app.tabs.items.last().map(|t| t.title).unwrap_or("");
+        let first_root = app.tabs.items.first().map(|t| t.title).unwrap_or("");
+        [last_root, "CPU Setup", first_root]
+    } else if app.editing_profile_idx.is_some() {
+        // Profile editing: show profile tab names
+        let before = app
+            .profile_tabs
             .get_before_selected()
-            .expect("No tab selected!")
-            .title,
-        app.tabs.get_selected().expect("No tab selected!").title,
-        app.tabs
+            .map(|t| t.title)
+            .unwrap_or("");
+        let current_title = app
+            .profile_tabs
+            .get_selected()
+            .map(|t| t.title)
+            .unwrap_or("");
+        let after = app
+            .profile_tabs
             .get_after_selected()
-            .expect("No tab selected!")
-            .title,
-    ];
+            .map(|t| t.title)
+            .unwrap_or("");
+        [before, current_title, after]
+    } else {
+        // Root tabs, with CPU Setup as wrap-around
+        let at_first = app.tabs.state.selected() == Some(0);
+        let at_last = app.tabs.state.selected() == Some(app.tabs.items.len() - 1);
+        let before = if at_first {
+            "CPU Setup"
+        } else {
+            app.tabs
+                .get_before_selected()
+                .map(|t| t.title)
+                .unwrap_or("")
+        };
+        let current_title = app
+            .tabs
+            .get_selected()
+            .map(|t| t.title)
+            .unwrap_or("");
+        let after = if at_last {
+            "CPU Setup"
+        } else {
+            app.tabs
+                .get_after_selected()
+                .map(|t| t.title)
+                .unwrap_or("")
+        };
+        [before, current_title, after]
+    };
 
     let is_gcc = read(&P1_CONTROLLER_STYLE) == ControllerStyle::GCController;
     let button_mapping = if is_gcc {
@@ -584,6 +703,7 @@ pub unsafe fn draw(root_pane: &Pane) {
     let name = "ResetDefaults";
     let key = reset_key;
     let title = match app.page {
+        AppPage::CPU_SETUP => "",
         AppPage::SUBMENU => "Reset All",
         AppPage::SLIDER => "Reset Current",
         AppPage::TOGGLE => "Reset Current",
@@ -623,6 +743,7 @@ pub unsafe fn draw(root_pane: &Pane) {
     }
 
     match app.page {
+        AppPage::CPU_SETUP => render_cpu_setup_page(&mut app, root_pane),
         AppPage::SUBMENU => render_submenu_page(&mut app, root_pane),
         AppPage::SLIDER => render_slider_page(&mut app, root_pane),
         AppPage::TOGGLE => render_toggle_page(&mut app, root_pane),

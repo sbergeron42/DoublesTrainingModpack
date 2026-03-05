@@ -36,7 +36,7 @@ fn roll_ledge_delay() {
         // Don't roll another ledge delay if one is already selected
         return;
     }
-    *ledge_delay_lock = read(&MENU).ledge_delay.get_random().into_longdelay();
+    *ledge_delay_lock = current_profile().ledge_delay.get_random().into_longdelay();
 }
 
 fn roll_ledge_case() {
@@ -46,36 +46,37 @@ fn roll_ledge_case() {
     if *ledge_case_lock != LedgeOption::empty() {
         return;
     }
-    *ledge_case_lock = read(&MENU).ledge_state.get_random();
+    *ledge_case_lock = current_profile().ledge_state.get_random();
 }
 
 fn get_ledge_option() -> Option<Action> {
+    let prof = current_profile();
     let mut override_action: Option<Action> = None;
-    let regular_action = if read(&MENU).mash_triggers.contains(&MashTrigger::LEDGE) {
-        Some(read(&MENU).mash_state.get_random())
+    let regular_action = if prof.mash_triggers.contains(&MashTrigger::LEDGE) {
+        Some(prof.mash_state.get_random())
     } else {
         None
     };
 
     match read(&LEDGE_CASE) {
         LedgeOption::NEUTRAL => {
-            if read(&MENU).ledge_neutral_override != Action::empty() {
-                override_action = Some(read(&MENU).ledge_neutral_override.get_random());
+            if prof.ledge_neutral_override != Action::empty() {
+                override_action = Some(prof.ledge_neutral_override.get_random());
             }
         }
         LedgeOption::ROLL => {
-            if read(&MENU).ledge_roll_override != Action::empty() {
-                override_action = Some(read(&MENU).ledge_roll_override.get_random());
+            if prof.ledge_roll_override != Action::empty() {
+                override_action = Some(prof.ledge_roll_override.get_random());
             }
         }
         LedgeOption::JUMP => {
-            if read(&MENU).ledge_jump_override != Action::empty() {
-                override_action = Some(read(&MENU).ledge_jump_override.get_random());
+            if prof.ledge_jump_override != Action::empty() {
+                override_action = Some(prof.ledge_jump_override.get_random());
             }
         }
         LedgeOption::ATTACK => {
-            if read(&MENU).ledge_attack_override != Action::empty() {
-                override_action = Some(read(&MENU).ledge_attack_override.get_random());
+            if prof.ledge_attack_override != Action::empty() {
+                override_action = Some(prof.ledge_attack_override.get_random());
             }
         }
         _ => {
@@ -130,7 +131,7 @@ pub unsafe fn force_option(module_accessor: &mut app::BattleObjectModuleAccessor
         // We buffer playback on frame 18 because we don't change status this frame from inputting on next frame; do we need to do one earlier for lasso?
         if should_buffer_playback
             && ledge_case.is_playback()
-            && read(&MENU).ledge_delay != LongDelay::empty()
+            && current_profile().ledge_delay != LongDelay::empty()
         {
             input_record::playback_ledge(ledge_case.playback_slot());
             return;
@@ -173,7 +174,7 @@ pub unsafe fn is_enable_transition_term(
 
     // Only handle ledge scenarios from menu
     if StatusModule::status_kind(_module_accessor) != *FIGHTER_STATUS_KIND_CLIFF_WAIT
-        || read(&MENU).ledge_state == LedgeOption::empty()
+        || current_profile().ledge_state == LedgeOption::empty()
     {
         return None;
     }
@@ -203,7 +204,7 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
             return;
         }
 
-        if read(&MENU).ledge_state == LedgeOption::empty() {
+        if current_profile().ledge_state == LedgeOption::empty() {
             return;
         }
 

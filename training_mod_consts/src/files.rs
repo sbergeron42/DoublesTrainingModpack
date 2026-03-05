@@ -7,7 +7,7 @@ pub const SAVE_STATES_TOML_PATH: &str = "sd:/ultimate/TrainingModpack/save_state
 pub const DEV_TOML_PATH: &str = "sd:/ultimate/TrainingModpack/dev.toml";
 pub const VERSION_TXT_PATH: &str = "sd:/ultimate/TrainingModpack/version.txt";
 pub const LAYOUT_ARC_PATH: &str = "sd:/ultimate/TrainingModpack/layout.arc";
-pub const MENU_OPTIONS_PATH: &str = "sd:/ultimate/TrainingModpack/training_modpack_menu.conf";
+pub const MENU_OPTIONS_PATH: &str = "sd:/ultimate/TrainingModpack/training_modpack_dubs.conf";
 pub const LEGACY_MENU_OPTIONS_PATH: &str =
     "sd:/ultimate/TrainingModpack/training_modpack_menu.json";
 pub const MENU_DEFAULT_OPTIONS_PATH: &str =

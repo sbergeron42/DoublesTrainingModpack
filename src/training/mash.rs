@@ -78,7 +78,7 @@ pub fn buffer_action(action: Action) {
     // exit playback if we want to perform mash actions out of it
     // TODO: Figure out some way to deal with trying to playback into another playback
     unsafe {
-        if read(&MENU).playback_mash == OnOff::ON
+        if current_profile().playback_mash == OnOff::ON
             && input_record::is_playback()
             && !input_record::is_recording()
             && !input_record::is_standby()
@@ -103,7 +103,7 @@ pub fn buffer_action(action: Action) {
 }
 
 pub fn buffer_follow_up() {
-    let action = read(&MENU).follow_up.get_random();
+    let action = current_profile().follow_up.get_random();
 
     if action == Action::empty() {
         return;
@@ -193,92 +193,92 @@ unsafe fn get_buffered_action(
         return None;
     }
     let fighter_distance = get_fighter_distance();
-    let menu = read(&MENU);
+    let prof = current_profile();
     if is_in_tech(module_accessor) {
-        let action = menu.tech_action_override.get_random();
+        let action = prof.tech_action_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::TECH) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::TECH) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_clatter(module_accessor) {
-        let action = menu.clatter_override.get_random();
+        let action = prof.clatter_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::CLATTER) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::CLATTER) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_tumble(module_accessor) {
         // Note that the tumble check needs to come before hitstun,
         // otherwise the hitstun check will always return first
-        let action = menu.tumble_override.get_random();
+        let action = prof.tumble_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::TUMBLE) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::TUMBLE) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_hitstun(module_accessor) {
-        let action = menu.hitstun_override.get_random();
+        let action = prof.hitstun_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::HIT) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::HIT) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_parry(module_accessor) {
-        let action = menu.parry_override.get_random();
+        let action = prof.parry_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::PARRY) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::PARRY) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_footstool(module_accessor) {
-        let action = menu.footstool_override.get_random();
+        let action = prof.footstool_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::FOOTSTOOL) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::FOOTSTOOL) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_ledgetrump(module_accessor) {
-        let action = menu.trump_override.get_random();
+        let action = prof.trump_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::TRUMP) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::TRUMP) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
     } else if is_in_landing(module_accessor) {
-        let action = menu.landing_override.get_random();
+        let action = prof.landing_override.get_random();
         if action != Action::empty() {
             Some(action)
-        } else if menu.mash_triggers.contains(&MashTrigger::LANDING) {
-            Some(menu.mash_state.get_random())
+        } else if prof.mash_triggers.contains(&MashTrigger::LANDING) {
+            Some(prof.mash_state.get_random())
         } else {
             None
         }
-    } else if (menu.mash_triggers.contains(&MashTrigger::GROUNDED) && is_grounded(module_accessor))
-        || (menu.mash_triggers.contains(&MashTrigger::AIRBORNE) && is_airborne(module_accessor))
-        || (menu.mash_triggers.contains(&MashTrigger::DISTANCE_CLOSE)
+    } else if (prof.mash_triggers.contains(&MashTrigger::GROUNDED) && is_grounded(module_accessor))
+        || (prof.mash_triggers.contains(&MashTrigger::AIRBORNE) && is_airborne(module_accessor))
+        || (prof.mash_triggers.contains(&MashTrigger::DISTANCE_CLOSE)
             && fighter_distance < DISTANCE_CLOSE_THRESHOLD)
-        || (menu.mash_triggers.contains(&MashTrigger::DISTANCE_MID)
+        || (prof.mash_triggers.contains(&MashTrigger::DISTANCE_MID)
             && fighter_distance < DISTANCE_MID_THRESHOLD)
-        || (menu.mash_triggers.contains(&MashTrigger::DISTANCE_FAR)
+        || (prof.mash_triggers.contains(&MashTrigger::DISTANCE_FAR)
             && fighter_distance < DISTANCE_FAR_THRESHOLD)
-        || menu.mash_triggers.contains(&MashTrigger::ALWAYS)
+        || prof.mash_triggers.contains(&MashTrigger::ALWAYS)
     {
-        Some(menu.mash_state.get_random())
+        Some(prof.mash_state.get_random())
     } else {
         // SHIELD handled in shield.rs
         // LEDGE handled in ledge.rs
@@ -292,7 +292,7 @@ fn buffer_menu_mash(action: Action) {
     fast_fall::roll_fast_fall();
     assign(
         &FALLING_AERIAL,
-        read(&MENU).falling_aerials.get_random().into_bool(),
+        current_profile().falling_aerials.get_random().into_bool(),
     );
 }
 
@@ -559,7 +559,7 @@ fn roll_aerial_delay(action: Action) {
 
     assign(
         &AERIAL_DELAY,
-        read(&MENU).aerial_delay.get_random().into_delay(),
+        current_profile().aerial_delay.get_random().into_delay(),
     );
 }
 

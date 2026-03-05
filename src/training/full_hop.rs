@@ -13,7 +13,7 @@ pub fn should_full_hop() -> bool {
 }
 
 pub fn roll_full_hop() {
-    assign(&FULL_HOP, read(&MENU).full_hop.get_random().into_bool());
+    assign(&FULL_HOP, current_profile().full_hop.get_random().into_bool());
 }
 
 pub unsafe fn check_button_on(

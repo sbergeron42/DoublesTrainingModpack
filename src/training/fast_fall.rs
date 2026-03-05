@@ -17,7 +17,7 @@ fn should_fast_fall() -> bool {
 }
 
 pub fn roll_fast_fall() {
-    assign(&FAST_FALL, read(&MENU).fast_fall.get_random().into_bool());
+    assign(&FAST_FALL, current_profile().fast_fall.get_random().into_bool());
 }
 
 pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
@@ -39,7 +39,7 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
             // Roll FF delay
             assign(
                 &DELAY,
-                read(&MENU).fast_fall_delay.get_random().into_delay(),
+                current_profile().fast_fall_delay.get_random().into_delay(),
             );
             frame_counter::full_reset(*FRAME_COUNTER_INDEX);
             return;

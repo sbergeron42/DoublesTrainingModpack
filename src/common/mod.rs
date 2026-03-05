@@ -4,6 +4,7 @@ use smash::lib::lua_const::*;
 use smash::lua2cpp::L2CFighterCommon;
 
 pub use crate::common::consts::MENU;
+pub use crate::common::consts::current_profile;
 use crate::common::consts::*;
 use crate::common::offsets::OFFSET_GET_BATTLE_OBJECT_FROM_ID;
 use crate::training::character_specific::ptrainer;

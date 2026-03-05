@@ -50,7 +50,7 @@ fn reset_oos_offset() {
      */
     assign(
         &MULTI_HIT_OFFSET,
-        read(&MENU).oos_offset.get_random().into_delay() + 1,
+        current_profile().oos_offset.get_random().into_delay() + 1,
     );
 }
 
@@ -71,7 +71,7 @@ fn handle_oos_offset(module_accessor: &mut app::BattleObjectModuleAccessor) {
     // Roll shield delay
     assign(
         &SHIELD_DELAY,
-        read(&MENU).reaction_time.get_random().into_delay(),
+        current_profile().reaction_time.get_random().into_delay(),
     );
 
     // Decrease offset once if needed
@@ -116,7 +116,7 @@ pub unsafe fn get_param_float(
         return None;
     }
 
-    if read(&MENU).shield_state != Shield::NONE {
+    if current_profile().shield_state != Shield::NONE {
         handle_oos_offset(module_accessor);
     }
 
@@ -125,7 +125,7 @@ pub unsafe fn get_param_float(
 
 // Shield Decay//Recovery
 fn handle_shield_decay(param_type: u64, param_hash: u64) -> Option<f32> {
-    let menu_state = read(&MENU).shield_state;
+    let menu_state = current_profile().shield_state;
 
     if menu_state != Shield::INFINITE
         && menu_state != Shield::CONSTANT
@@ -163,7 +163,7 @@ pub unsafe fn param_installer() {
             *cached_shield_damage_mul_lock = Some(common_params.shield_damage_mul);
         }
 
-        if is_training_mode() && (read(&MENU).shield_state == Shield::INFINITE) {
+        if is_training_mode() && (current_profile().shield_state == Shield::INFINITE) {
             // if you are in training mode and have infinite shield enabled,
             // set the game's shield_damage_mul to 0.0
             common_params.shield_damage_mul = 0.0;
@@ -178,13 +178,13 @@ pub unsafe fn param_installer() {
 }
 
 pub unsafe fn should_hold_shield(module_accessor: &mut app::BattleObjectModuleAccessor) -> bool {
-    let shield_state = &read(&MENU).shield_state;
+    let shield_state = current_profile().shield_state;
     !input_record::is_playback()
         && !input_record::is_standby()
         && !save_states::is_loading()
         && !was_airborne(module_accessor)
         && (mash::request_shield(module_accessor)
-            || [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(shield_state))
+            || [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(&shield_state))
 }
 
 #[skyline::hook(replace = smash::lua2cpp::L2CFighterCommon_sub_guard_cont)]
@@ -210,7 +210,7 @@ unsafe fn mod_handle_sub_guard_cont(fighter: &mut L2CFighterCommon) {
     }
 
     // Enable shield decay
-    if read(&MENU).shield_state == Shield::HOLD {
+    if current_profile().shield_state == Shield::HOLD {
         set_shield_decay(true);
     }
 
@@ -232,11 +232,12 @@ unsafe fn mod_handle_sub_guard_cont(fighter: &mut L2CFighterCommon) {
         return;
     }
 
-    if read(&MENU).mash_triggers.contains(&MashTrigger::SHIELDSTUN) {
-        if read(&MENU).shieldstun_override == Action::empty() {
-            mash::external_buffer_menu_mash(read(&MENU).mash_state.get_random())
+    let prof = current_profile();
+    if prof.mash_triggers.contains(&MashTrigger::SHIELDSTUN) {
+        if prof.shieldstun_override == Action::empty() {
+            mash::external_buffer_menu_mash(prof.mash_state.get_random())
         } else {
-            mash::external_buffer_menu_mash(read(&MENU).shieldstun_override.get_random())
+            mash::external_buffer_menu_mash(prof.shieldstun_override.get_random())
         }
     }
 
@@ -342,9 +343,9 @@ fn needs_oos_handling_drop_shield() -> bool {
     }
     // Make sure we only flicker shield when Airdodge and Shield mash options are selected
     if action == Action::AIR_DODGE {
-        let shield_state = &read(&MENU).shield_state;
+        let shield_state = current_profile().shield_state;
         // If we're supposed to be holding shield, let airdodge make us drop shield
-        if [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(shield_state) {
+        if [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(&shield_state) {
             suspend_shield(Action::AIR_DODGE);
         }
         return true;
@@ -352,18 +353,18 @@ fn needs_oos_handling_drop_shield() -> bool {
 
     // Make sure we only flicker shield when Airdodge and Shield mash options are selected
     if action == Action::AIR_DODGE {
-        let shield_state = &read(&MENU).shield_state;
+        let shield_state = current_profile().shield_state;
         // If we're supposed to be holding shield, let airdodge make us drop shield
-        if [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(shield_state) {
+        if [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(&shield_state) {
             suspend_shield(Action::AIR_DODGE);
         }
         return true;
     }
 
     if action == Action::SHIELD {
-        let shield_state = &read(&MENU).shield_state;
+        let shield_state = current_profile().shield_state;
         // Don't drop shield on shield hit if we're supposed to be holding shield
-        if [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(shield_state) {
+        if [Shield::HOLD, Shield::INFINITE, Shield::CONSTANT].contains(&shield_state) {
             return false;
         }
         return true;

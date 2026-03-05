@@ -9,7 +9,7 @@ static ATTACK_ANGLE_DIRECTION: RwLock<AttackAngle> = RwLock::new(AttackAngle::NE
 pub fn roll_direction() {
     assign(
         &ATTACK_ANGLE_DIRECTION,
-        read(&MENU).attack_angle.get_random(),
+        current_profile().attack_angle.get_random(),
     );
 }
 

@@ -1,7 +1,7 @@
 use std::ptr::addr_of_mut;
 
 use crate::common::button_config;
-use crate::common::consts::{BuffOption, FighterId, MENU};
+use crate::common::consts::{BuffOption, FighterId, MENU, CURRENT_CPU_ENTRY_ID, current_profile};
 use crate::common::offsets::*;
 use crate::common::{
     dev_config, is_operation_cpu, is_training_mode, menu, try_get_module_accessor, PauseMenu,
@@ -135,6 +135,7 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             module_accessor,
             *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID,
         );
+        CURRENT_CPU_ENTRY_ID.store(entry_id, core::sync::atomic::Ordering::Relaxed);
         if entry_id == 0 {
             doubles::sync_team_battle_flag();
         }
@@ -151,7 +152,7 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             // Handle dodge staling here b/c input recording or mash can cause dodging
             WorkModule::set_flag(
                 module_accessor,
-                !(read(&MENU).stale_dodges.as_bool()),
+                !(current_profile().stale_dodges.as_bool()),
                 *FIGHTER_INSTANCE_WORK_ID_FLAG_DISABLE_ESCAPE_PENALTY,
             );
             input_record::handle_recording();
@@ -779,7 +780,7 @@ pub unsafe fn handle_reused_ui(
             .iter()
             .filter_map(|id| try_get_module_accessor(*id))
             .any(|ma| utility::get_kind(&mut *ma) == *FIGHTER_KIND_LITTLEMAC);
-        if has_littlemac && read(&MENU).buff_state.contains(&BuffOption::KO) {
+        if has_littlemac && current_profile().buff_state.contains(&BuffOption::KO) {
             param_2 = 100;
         }
     }

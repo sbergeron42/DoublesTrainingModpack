@@ -17,7 +17,7 @@ pub fn roll_di_case() {
         // DI direction already selected, don't pick a new one
         return;
     }
-    *di_case_lock = read(&MENU).di_state.get_random();
+    *di_case_lock = current_profile().di_state.get_random();
 }
 
 pub fn reset_di_case(module_accessor: &mut app::BattleObjectModuleAccessor) {
@@ -44,7 +44,7 @@ pub unsafe fn handle_correct_damage_vector_common(
 }
 
 unsafe fn mod_handle_di(fighter: &L2CFighterCommon, _arg1: L2CValue) {
-    if read(&MENU).di_state == Direction::empty() {
+    if current_profile().di_state == Direction::empty() {
         return;
     }
 

@@ -15,7 +15,7 @@ use SaveState::*;
 use crate::common::button_config;
 use crate::common::consts::get_random_float;
 use crate::common::consts::get_random_int;
-use crate::common::consts::OnOff;
+use crate::common::consts::{current_profile, OnOff};
 use crate::common::consts::PlaybackSlot;
 use crate::common::consts::RecordTrigger;
 use crate::common::consts::SaveStateMirroring;
@@ -650,22 +650,23 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
                     ),
                 }
             } else {
-                match read(&MENU).save_damage_cpu {
+                let profile = current_profile();
+                match profile.save_damage_cpu {
                     SaveDamage::SAVED => {
                         set_damage(module_accessor, save_state.percent);
                     }
                     SaveDamage::RANDOM => {
                         // Gen random value
                         let pct: f32 = get_random_float(
-                            read(&MENU).save_damage_limits_cpu.UPPER as f32,
-                            read(&MENU).save_damage_limits_cpu.LOWER as f32,
+                            profile.save_damage_limits_cpu.UPPER as f32,
+                            profile.save_damage_limits_cpu.LOWER as f32,
                         );
                         set_damage(module_accessor, pct);
                     }
                     SaveDamage::DEFAULT => {}
                     _ => panic!(
                         "Invalid value in save_states()::save_damage_cpu: {}",
-                        read(&MENU).save_damage_cpu
+                        profile.save_damage_cpu
                     ),
                 }
             }

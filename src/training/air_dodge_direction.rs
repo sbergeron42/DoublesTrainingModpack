@@ -34,7 +34,7 @@ unsafe fn get_angle(module_accessor: &mut app::BattleObjectModuleAccessor) -> Op
 
     assign(
         &AIRDODGE_STICK_DIRECTION,
-        read(&MENU).air_dodge_dir.get_random(),
+        current_profile().air_dodge_dir.get_random(),
     );
     let direction = read(&AIRDODGE_STICK_DIRECTION);
     direction.into_angle().map(|angle| {
