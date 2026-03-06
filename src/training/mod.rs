@@ -42,7 +42,6 @@ pub mod character_specific;
 mod fast_fall;
 mod full_hop;
 pub mod input_delay;
-mod input_log;
 mod input_record;
 mod mash;
 mod reset;
@@ -880,8 +879,6 @@ unsafe fn handle_final_input_mapping(
     // MUTATES controller state to delay inputs
     input_delay::handle_final_input_mapping(player_idx, out);
 
-    // Read potentially delayed state for loggers
-    input_log::handle_final_input_mapping(player_idx, controller_struct, out);
 
     // Potentially apply input recording, thus with delay
     // MUTATES controller state to apply recording or playback
@@ -1009,7 +1006,9 @@ pub fn training_mods() {
         // Doubles: fix cloned character hash for entries 2/3 during CSS→training transition
         doubles::clone_write_hook,
         // Doubles: CSS team/solo toggle button handler
-        doubles::btn_rule_handler_hook
+        doubles::btn_rule_handler_hook,
+        // Doubles: prevent footstools between teammates in team mode
+        doubles::change_status_req_script_hook
     );
 
     items::init();

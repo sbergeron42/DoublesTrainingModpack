@@ -13,7 +13,7 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use skyline::nn::ui2d::{Material, MaterialFlags, MaterialColorType, Pane, ResColor};
-use smash::app::{lua_bind::*, BattleObjectModuleAccessor};
+use smash::app::{self, lua_bind::*, BattleObjectModuleAccessor};
 use smash::lib::lua_const::*;
 use smash::ui2d::{SmashPane, SmashTextBox};
 use training_mod_sync::*;
@@ -216,20 +216,18 @@ pub unsafe fn setup_native_fim_for_humans(
         let slot_addr = (input_mgr + 0x298 + entry_id as usize * 4) as *mut i32;
         core::ptr::write_volatile(slot_addr, assigned_slot);
 
-        // Write the correct profile button mappings.
-        // tag == 0 means "no profile selected" (or first custom profile — accepted
-        // edge case). Use game defaults so tap-jump and standard bindings work.
-        let tag = HUMAN_ENTRY_TAG[entry_id as usize].load(Ordering::Relaxed);
-        let dst = (input_mgr + 0x18 + entry_id as usize * 0x50) as *mut ControllerMapping;
-        if tag > 0 {
-            if let Some(mapping) = get_profile_mapping(tag) {
-                core::ptr::write_volatile(dst, mapping);
-            } else {
-                core::ptr::write_volatile(dst, DEFAULT_CONTROLLER_MAPPING);
-            }
-        } else {
-            core::ptr::write_volatile(dst, DEFAULT_CONTROLLER_MAPPING);
-        }
+        // Write only the first 0x2B bytes of ControllerMapping (profile/button data).
+        // Bytes 0x2B-0x4F are persistent state used by fim_cstick_handler — writing
+        // them every frame resets the c-stick shift register, hold counter, timer,
+        // and direction lock, breaking c-stick on non-P1 human entries.
+        let dst = (input_mgr + 0x18 + entry_id as usize * 0x50) as *mut u8;
+        let mapping = get_cached_profile_mapping(entry_id as usize)
+            .unwrap_or(DEFAULT_CONTROLLER_MAPPING);
+        core::ptr::copy_nonoverlapping(
+            &mapping as *const ControllerMapping as *const u8,
+            dst,
+            0x2B,
+        );
 
         // Diagnostic logging
         let log_count = SETUP_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -248,6 +246,7 @@ pub unsafe fn setup_native_fim_for_humans(
                 }
             }
             let entry_npad = HUMAN_ENTRY_NPAD[entry_id as usize].load(Ordering::Relaxed);
+            let tag = HUMAN_ENTRY_TAG[entry_id as usize].load(Ordering::Relaxed);
             debug_log(&format!(
                 "NATIVE_FIM_SETUP: entry={} npad={} slot={} ctrl_type={} ctrl_npad={} tag={} p1_slot={} avail={}",
                 entry_id, entry_npad, assigned_slot, ctrl_type, ctrl_npad, tag, p1_slot, num_avail
@@ -260,19 +259,22 @@ pub unsafe fn setup_native_fim_for_humans(
 // SD card debug log
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "doubles_debug_log")]
 const DOUBLES_DEBUG_LOG: &str = "sd:/ultimate/TrainingModpack/doubles_debug.log";
 
 /// Appends `msg` with a timestamp to the persistent debug file on the SD card.
 /// On the first call each session, the file is truncated (overwritten) so you
 /// always get a fresh log without manual cleanup.
 /// Errors are silently ignored so this is safe to call from any hook context.
+///
+/// Gated behind the `doubles_debug_log` feature flag — no-op in release builds
+/// to avoid format! allocations and SD card I/O every frame.
+#[cfg(feature = "doubles_debug_log")]
 pub fn debug_log(msg: &str) {
     use std::io::Write;
-    // Monotonic frame counter as lightweight timestamp (no std::time on this platform).
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     static FIRST_CALL: AtomicBool = AtomicBool::new(true);
     let tick = COUNTER.fetch_add(1, Ordering::Relaxed);
-    // First call: truncate. Subsequent calls: append.
     let truncate = FIRST_CALL.swap(false, Ordering::Relaxed);
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true);
@@ -286,22 +288,159 @@ pub fn debug_log(msg: &str) {
     }
 }
 
+#[cfg(not(feature = "doubles_debug_log"))]
+#[inline(always)]
+pub fn debug_log(_msg: &str) {}
+
 // ---------------------------------------------------------------------------
 // CPU↔CPU hit-team assignment
 // ---------------------------------------------------------------------------
 
+/// Per-entry flag: true once hit-team has been applied this session.
+/// Reset by `invalidate_hit_teams()` on CSS re-entry or team mode toggle.
+static HIT_TEAM_APPLIED: [AtomicBool; 4] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+/// Call when team assignments may have changed (CSS re-entry, team toggle)
+/// so hit-teams get re-applied on next frame.
+pub fn invalidate_hit_teams() {
+    for flag in &HIT_TEAM_APPLIED {
+        flag.store(false, Ordering::Relaxed);
+    }
+}
+
 pub unsafe fn set_cpu_hit_team(module_accessor: &mut BattleObjectModuleAccessor) {
     let entry_id =
         WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+
+    // Skip if already applied — team values don't change mid-match.
+    if (entry_id as usize) < 4 && HIT_TEAM_APPLIED[entry_id as usize].load(Ordering::Relaxed) {
+        return;
+    }
+
     // Every fighter gets hit-team = entry_id so all 4 can hit each other.
-    // Without this, fighters on the same team share a hit-team and their
-    // hitboxes pass through each other.
     TeamModule::set_hit_team(module_accessor, entry_id);
-    // Also set the general team affiliation (team_no) to a unique value.
-    // The game checks team_no in addition to hit_team_no for some hit
-    // interactions — without this, P3/P4 (cloned from CPU1, team_no=1)
-    // cannot hit P2 (also team_no=1) even though hit_team differs.
+    // Also set team_no to a unique value — game checks both for some interactions.
     TeamModule::set_team(module_accessor, entry_id, false);
+
+    // Jostle: in team mode, same-color teammates share a jostle team.
+    if is_team_mode() && (entry_id as usize) < 4 {
+        let team_color = TEAM_COLORS[entry_id as usize].load(Ordering::Relaxed) as i32;
+        JostleModule::set_team(module_accessor, team_color);
+    } else {
+        JostleModule::set_team(module_accessor, entry_id);
+    }
+
+    if (entry_id as usize) < 4 {
+        HIT_TEAM_APPLIED[entry_id as usize].store(true, Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Team footstool prevention
+// ---------------------------------------------------------------------------
+//
+// In team mode, teammates must not be able to footstool each other while
+// still being able to hit/grab. The game's built-in team system is
+// all-or-nothing (team_attack flag controls BOTH hits and footstools),
+// so we hook StatusModule::change_status_request_from_script_impl.
+//
+// Strategy: intercept TREAD_JUMP (attacker) only. Read TREAD_TARGET_ID
+// from the attacker to identify the victim. If same team → redirect to
+// JUMP_AERIAL (preserves jump input). The detection code then checks the
+// attacker's status, doesn't find TREAD_JUMP, and never calls TREAD_DAMAGE
+// for the victim. No deferred state needed.
+
+const OFFSET_CHANGE_STATUS_REQ_SCRIPT: usize = 0x20876e0;
+
+/// Given a TREAD_TARGET_ID value from the attacker, resolve the victim's
+/// entry_id by comparing against all fighters' battle_object_ids.
+unsafe fn resolve_tread_target(target_id: i32) -> Option<usize> {
+    let fm_addr = training_mod_sync::read(&FIGHTER_MANAGER_ADDR);
+    if fm_addr == 0 {
+        return None;
+    }
+    let fm = *(fm_addr as *mut *mut app::FighterManager);
+
+    for entry in 0..4i32 {
+        let entry_id = app::FighterEntryID(entry);
+        let fighter_entry =
+            FighterManager::get_fighter_entry(fm, entry_id) as *mut app::FighterEntry;
+        if fighter_entry.is_null() {
+            continue;
+        }
+        let obj_id = FighterEntry::current_fighter_id(fighter_entry);
+        if obj_id as i32 == target_id {
+            return Some(entry as usize);
+        }
+    }
+    None
+}
+
+#[skyline::hook(offset = OFFSET_CHANGE_STATUS_REQ_SCRIPT)]
+unsafe fn change_status_req_script_hook(
+    boma: *mut BattleObjectModuleAccessor,
+    status_kind: i32,
+    unk: bool,
+) -> u64 {
+    // Only intercept TREAD_JUMP (attacker) in team mode.
+    if !is_team_mode() || status_kind != *FIGHTER_STATUS_KIND_TREAD_JUMP {
+        return call_original!(boma, status_kind, unk);
+    }
+
+    // Identify the attacker's team.
+    let attacker_entry = WorkModule::get_int(
+        &mut *boma,
+        *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID,
+    ) as usize;
+    if attacker_entry >= 4 {
+        return call_original!(boma, status_kind, unk);
+    }
+    let attacker_team = TEAM_COLORS[attacker_entry].load(Ordering::Relaxed);
+
+    // Read TREAD_TARGET_ID to find the victim.
+    let target_id = WorkModule::get_int(
+        &mut *boma,
+        *FIGHTER_INSTANCE_WORK_ID_INT_TREAD_TARGET_ID,
+    );
+    if let Some(victim_entry) = resolve_tread_target(target_id) {
+        if victim_entry < 4 {
+            let victim_team = TEAM_COLORS[victim_entry].load(Ordering::Relaxed);
+            if attacker_team == victim_team {
+                // Same team: convert footstool into a normal aerial jump
+                // (since the detection code already consumed the jump input).
+                // Manually increment JUMP_COUNT so the jump is properly
+                // consumed — prevents infinite double jumps.
+                let jump_count = WorkModule::get_int(
+                    &mut *boma,
+                    *FIGHTER_INSTANCE_WORK_ID_INT_JUMP_COUNT,
+                );
+                let jump_max = WorkModule::get_int(
+                    &mut *boma,
+                    *FIGHTER_INSTANCE_WORK_ID_INT_JUMP_COUNT_MAX,
+                );
+                if jump_count < jump_max {
+                    WorkModule::set_int(
+                        &mut *boma,
+                        jump_count + 1,
+                        *FIGHTER_INSTANCE_WORK_ID_INT_JUMP_COUNT,
+                    );
+                    return call_original!(
+                        boma,
+                        *FIGHTER_STATUS_KIND_JUMP_AERIAL,
+                        unk
+                    );
+                }
+                // No jumps remaining: just suppress the footstool.
+                return 0;
+            }
+        }
+    }
+
+    // Different teams or unresolvable target: allow footstool.
+    call_original!(boma, status_kind, unk)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +564,38 @@ static HUMAN_ENTRY_TAG: [AtomicU32; 4] = [
     AtomicU32::new(0), AtomicU32::new(0),
     AtomicU32::new(0), AtomicU32::new(0),
 ];
+
+/// Cached ControllerMapping per entry. Populated at CSS (when tag is set) so
+/// setup_native_fim_for_humans doesn't walk the 6-pointer profile chain every frame.
+/// Uses UnsafeCell because it's only written from clone_write (single-threaded CSS)
+/// and read from FIM hook (single-threaded per-frame).
+use core::cell::UnsafeCell;
+struct SyncMapping(UnsafeCell<Option<ControllerMapping>>);
+unsafe impl Sync for SyncMapping {}
+impl SyncMapping {
+    const fn new() -> Self { SyncMapping(UnsafeCell::new(None)) }
+}
+static CACHED_PROFILE_MAPPING: [SyncMapping; 4] = [
+    SyncMapping::new(), SyncMapping::new(),
+    SyncMapping::new(), SyncMapping::new(),
+];
+
+/// Cache the profile mapping for an entry. Called at CSS when tag is set.
+unsafe fn cache_profile_mapping(entry_id: usize, tag: u32) {
+    if entry_id < 4 {
+        let mapping = if tag > 0 { get_profile_mapping(tag) } else { None };
+        *CACHED_PROFILE_MAPPING[entry_id].0.get() = mapping;
+    }
+}
+
+/// Get the cached profile mapping for an entry.
+fn get_cached_profile_mapping(entry_id: usize) -> Option<ControllerMapping> {
+    if entry_id < 4 {
+        unsafe { *CACHED_PROFILE_MAPPING[entry_id].0.get() }
+    } else {
+        None
+    }
+}
 
 /// Returns the tag/profile index for a given entry, as saved during clone_write.
 pub fn get_entry_tag(entry_id: i32) -> u32 {
@@ -1180,6 +1351,7 @@ unsafe fn poll_css_team_toggle() {
                 let old = TEAM_COLORS[i].load(Ordering::Relaxed);
                 let new_color = (old + 1) % 4;
                 TEAM_COLORS[i].store(new_color, Ordering::Relaxed);
+                invalidate_hit_teams();
                 COOLDOWN.store(10, Ordering::Relaxed);
                 debug_log(&format!(
                     "CSS team color: P{} → {}",
@@ -1773,6 +1945,7 @@ pub unsafe fn btn_rule_handler_hook(scene_obj: *mut u8) -> u64 {
     if result == 1 {
         let new_val = !TEAM_MODE.load(Ordering::Relaxed);
         TEAM_MODE.store(new_val, Ordering::Relaxed);
+        invalidate_hit_teams();
         debug_log(&format!("btn_rule toggle: team_mode = {}", new_val));
     }
     result
@@ -2127,6 +2300,7 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
     // can restore it when the user returns to CSS from training mode.
     if entry_index == 0 {
         save_css_state_for_reentry();
+        invalidate_hit_teams();
         // Reset npad→entry mapping. Entry 0 always uses npad 0.
         for i in 0..8 {
             NPAD_TO_ENTRY[i].store(-1, Ordering::Relaxed);
@@ -2136,9 +2310,12 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         for slot in &HUMAN_ENTRY_NPAD {
             slot.store(-1, Ordering::Relaxed);
         }
-        // Reset tag/profile tracking.
+        // Reset tag/profile tracking and cached mappings.
         for slot in &HUMAN_ENTRY_TAG {
             slot.store(0, Ordering::Relaxed);
+        }
+        for i in 0..4 {
+            *CACHED_PROFILE_MAPPING[i].0.get() = None;
         }
     }
 
@@ -2155,6 +2332,7 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         let panel_tag = read_css_panel_tag(1);
         let entry1_tag = if panel_tag > 0 || is_entry1_human { panel_tag } else { config_tag };
         HUMAN_ENTRY_TAG[1].store(entry1_tag, Ordering::Relaxed);
+        cache_profile_mapping(1, entry1_tag);
 
         if is_entry1_human {
             // config[0x7C] is NOT reliable for entry 1 — the game reuses a
@@ -2286,6 +2464,7 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
             core::ptr::write_volatile(config.add(0x214) as *mut u32, panel_tag);
             // Save tag for later profile lookup in FIM extra calls.
             HUMAN_ENTRY_TAG[entry_index as usize].store(panel_tag, Ordering::Relaxed);
+            cache_profile_mapping(entry_index as usize, panel_tag);
         }
 
         debug_log(&format!(

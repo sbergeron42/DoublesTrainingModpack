@@ -39,8 +39,6 @@ pub struct TrainingModpackMenu {
     pub frame_advantage: OnOff,
     pub full_hop: BoolFlag,
     pub hitbox_vis: OnOff,
-    pub input_display: InputDisplay,
-    pub input_display_status: OnOff,
     pub hud: OnOff,
     pub input_delay: Delay,
     pub ledge_delay: LongDelay,
@@ -150,8 +148,6 @@ pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {
     frame_advantage: OnOff::OFF,
     full_hop: BoolFlag::TRUE,
     hitbox_vis: OnOff::OFF,
-    input_display: InputDisplay::SMASH,
-    input_display_status: OnOff::OFF,
     hud: OnOff::ON,
     input_delay: Delay::D0,
     ledge_delay: LongDelay::empty(),
@@ -958,20 +954,6 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         "Hitbox Visualization",
         "hitbox_vis",
         "Display a visual representation for active hitboxes (hides other visual effects)",
-        ToggleSingle,
-        false,
-    ));
-    misc_tab_submenus.push(InputDisplay::to_submenu(
-        "Input Display",
-        "input_display",
-        "Log inputs in a queue on the left of the screen",
-        ToggleSingle,
-        false,
-    ));
-    misc_tab_submenus.push(OnOff::to_submenu(
-        "Input Display Status",
-        "input_display_status",
-        "Group input logs by status in which they occurred",
         ToggleSingle,
         false,
     ));

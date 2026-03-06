@@ -124,6 +124,13 @@ unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
                     }
                 }
 
+                // Hide icon panes for removed features still in layout.arc
+                for removed_id in ["input_display", "input_display_status"] {
+                    if let Some(p) = menu_button.find_pane_by_name_recursive(removed_id) {
+                        p.set_visible(false);
+                    }
+                }
+
                 menu_button
                     .find_pane_by_name_recursive_expect("check")
                     .set_visible(false);

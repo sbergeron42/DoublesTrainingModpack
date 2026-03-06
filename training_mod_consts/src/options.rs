@@ -1133,16 +1133,6 @@ impl UpdatePolicy {
     }
 }
 
-byteflags! {
-    pub struct InputDisplay {
-        pub NONE = "None",
-        pub SMASH = "Smash Inputs",
-        pub RAW = "Raw Inputs",
-        pub STATUS = "Status Only",
-    }
-}
-
-impl_submenutrait!(InputDisplay);
 
 // ---------------------------------------------------------------------------
 // TeammateSlot — which CPU slot is controlled by a human (P2) in doubles mode

@@ -16,7 +16,6 @@ use training_mod_sync::*;
 
 mod damage;
 mod display;
-mod input_log;
 pub mod menu;
 pub mod notifications;
 
@@ -81,9 +80,15 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
 
     if layout_name == "info_training" {
         frame_counter::tick_real();
-        input_log::draw(root_pane);
         display::draw(root_pane);
         menu::draw(root_pane);
+
+        // Hide the input log container — the input_log feature was removed
+        // but the pane still exists in layout.arc. Must be set every frame
+        // because the layout engine resets visibility during draw.
+        if let Some(log_pane) = root_pane.find_pane_by_name_recursive("TrModInputLog") {
+            log_pane.set_visible(false);
+        }
     }
 
     original!()(layout, draw_info, cmd_buffer);
