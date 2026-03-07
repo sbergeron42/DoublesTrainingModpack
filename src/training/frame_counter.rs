@@ -1,77 +1,84 @@
-use training_mod_sync::*;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
-static COUNTERS: RwLock<Vec<FrameCounter>> = RwLock::new(vec![]);
-#[derive(PartialEq, Eq)]
+const MAX_COUNTERS: usize = 64;
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
 pub enum FrameCounterType {
-    InGame,
+    InGame = 0,
     // "Reset" occurs when we enter training mode and when we run L+R+A or save state load
     // Some frame counters need in-game frames that do not reset when this occurs
-    InGameNoReset,
-    Real,
+    InGameNoReset = 1,
+    Real = 2,
 }
 
-pub struct FrameCounter {
-    count: u32,
-    should_count: bool,
-    counter_type: FrameCounterType,
+struct AtomicFrameCounter {
+    count: AtomicU32,
+    should_count: AtomicBool,
+    counter_type: AtomicU8,
 }
+
+impl AtomicFrameCounter {
+    const fn new() -> Self {
+        Self {
+            count: AtomicU32::new(0),
+            should_count: AtomicBool::new(false),
+            counter_type: AtomicU8::new(0),
+        }
+    }
+}
+
+static COUNTERS: [AtomicFrameCounter; MAX_COUNTERS] = {
+    const INIT: AtomicFrameCounter = AtomicFrameCounter::new();
+    [INIT; MAX_COUNTERS]
+};
+static COUNTER_LEN: AtomicUsize = AtomicUsize::new(0);
 
 pub fn register_counter(counter_type: FrameCounterType) -> usize {
-    let mut counters_lock = lock_write(&COUNTERS);
-    let index = (*counters_lock).len();
-    (*counters_lock).push(FrameCounter {
-        count: 0,
-        should_count: false,
-        counter_type,
-    });
+    let index = COUNTER_LEN.fetch_add(1, Ordering::Relaxed);
+    assert!(index < MAX_COUNTERS, "Too many frame counters registered");
+    COUNTERS[index].count.store(0, Ordering::Relaxed);
+    COUNTERS[index].should_count.store(false, Ordering::Relaxed);
+    COUNTERS[index].counter_type.store(counter_type as u8, Ordering::Relaxed);
     index
 }
 
 pub fn start_counting(index: usize) {
-    let mut counters_lock = lock_write(&COUNTERS);
-    (*counters_lock)[index].should_count = true;
+    COUNTERS[index].should_count.store(true, Ordering::Relaxed);
 }
 
 pub fn stop_counting(index: usize) {
-    let mut counters_lock = lock_write(&COUNTERS);
-    (*counters_lock)[index].should_count = false;
+    COUNTERS[index].should_count.store(false, Ordering::Relaxed);
 }
 
 pub fn _is_counting(index: usize) -> bool {
-    let counters_lock = lock_read(&COUNTERS);
-    (*counters_lock)[index].should_count
+    COUNTERS[index].should_count.load(Ordering::Relaxed)
 }
 
 pub fn reset_frame_count(index: usize) {
-    let mut counters_lock = lock_write(&COUNTERS);
-    (*counters_lock)[index].count = 0;
+    COUNTERS[index].count.store(0, Ordering::Relaxed);
 }
 
-/// Resets count to 0 and stops counting in a single lock acquisition.
+/// Resets count to 0 and stops counting.
 pub fn full_reset(index: usize) {
-    let mut counters_lock = lock_write(&COUNTERS);
-    let counter = &mut (*counters_lock)[index];
-    counter.count = 0;
-    counter.should_count = false;
+    COUNTERS[index].count.store(0, Ordering::Relaxed);
+    COUNTERS[index].should_count.store(false, Ordering::Relaxed);
 }
 
 /// Returns true until a certain number of frames have passed.
-/// Uses a single lock acquisition instead of separate get/start/reset calls.
 pub fn should_delay(delay: u32, index: usize) -> bool {
     if delay == 0 {
         return false;
     }
 
-    let mut counters_lock = lock_write(&COUNTERS);
-    let counter = &mut (*counters_lock)[index];
-
-    if counter.count == 0 {
-        counter.should_count = true;
+    let c = &COUNTERS[index];
+    if c.count.load(Ordering::Relaxed) == 0 {
+        c.should_count.store(true, Ordering::Relaxed);
     }
 
-    if counter.count >= delay {
-        counter.count = 0;
-        counter.should_count = false;
+    if c.count.load(Ordering::Relaxed) >= delay {
+        c.count.store(0, Ordering::Relaxed);
+        c.should_count.store(false, Ordering::Relaxed);
         return false;
     }
 
@@ -79,48 +86,50 @@ pub fn should_delay(delay: u32, index: usize) -> bool {
 }
 
 pub fn get_frame_count(index: usize) -> u32 {
-    let counters_lock = lock_read(&COUNTERS);
-    (*counters_lock)[index].count
+    COUNTERS[index].count.load(Ordering::Relaxed)
 }
 
 pub fn tick_idx(index: usize) {
-    let mut counters_lock = lock_write(&COUNTERS);
-    (*counters_lock)[index].count += 1;
+    COUNTERS[index].count.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn tick_ingame() {
-    let mut counters_lock = lock_write(&COUNTERS);
-    for counter in (*counters_lock).iter_mut() {
-        if !counter.should_count || counter.counter_type == FrameCounterType::Real {
+    let len = COUNTER_LEN.load(Ordering::Relaxed);
+    for i in 0..len {
+        let c = &COUNTERS[i];
+        if !c.should_count.load(Ordering::Relaxed) {
             continue;
         }
-        // same as full_reset, but we already have the lock so we can't lock again
-        counter.count += 1;
+        if c.counter_type.load(Ordering::Relaxed) == FrameCounterType::Real as u8 {
+            continue;
+        }
+        c.count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 pub fn tick_real() {
-    let mut counters_lock = lock_write(&COUNTERS);
-    for counter in (*counters_lock).iter_mut() {
-        if !counter.should_count
-            || (counter.counter_type == FrameCounterType::InGame
-                || counter.counter_type == FrameCounterType::InGameNoReset)
-        {
+    let len = COUNTER_LEN.load(Ordering::Relaxed);
+    for i in 0..len {
+        let c = &COUNTERS[i];
+        if !c.should_count.load(Ordering::Relaxed) {
             continue;
         }
-        // same as full_reset, but we already have the lock so we can't lock again
-        counter.count += 1;
+        let ct = c.counter_type.load(Ordering::Relaxed);
+        if ct == FrameCounterType::InGame as u8 || ct == FrameCounterType::InGameNoReset as u8 {
+            continue;
+        }
+        c.count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 pub fn reset_all() {
-    let mut counters_lock = lock_write(&COUNTERS);
-    for counter in (*counters_lock).iter_mut() {
-        if counter.counter_type != FrameCounterType::InGame {
+    let len = COUNTER_LEN.load(Ordering::Relaxed);
+    for i in 0..len {
+        let c = &COUNTERS[i];
+        if c.counter_type.load(Ordering::Relaxed) != FrameCounterType::InGame as u8 {
             continue;
         }
-        // same as full_reset, but we already have the lock so we can't lock again
-        counter.count = 0;
-        counter.should_count = false;
+        c.count.store(0, Ordering::Relaxed);
+        c.should_count.store(false, Ordering::Relaxed);
     }
 }

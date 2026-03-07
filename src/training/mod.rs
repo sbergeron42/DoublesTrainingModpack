@@ -4,7 +4,7 @@ use crate::common::button_config;
 use crate::common::consts::{BuffOption, FighterId, MENU, CURRENT_CPU_ENTRY_ID, current_profile, refresh_current_profile};
 use crate::common::offsets::*;
 use crate::common::{
-    dev_config, is_operation_cpu, is_training_mode, menu, refresh_is_training_mode,
+    dev_config, is_fighter, is_operation_cpu, is_training_mode, menu, refresh_is_training_mode,
     refresh_is_operation_cpu, try_get_module_accessor, PauseMenu,
     FIGHTER_MANAGER_ADDR, ITEM_MANAGER_ADDR, STAGE_MANAGER_ADDR, TRAINING_MENU_ADDR,
 };
@@ -377,6 +377,41 @@ pub unsafe fn handle_set_dead_rumble(lua_state: u64) -> u64 {
     }
 
     original!()(lua_state)
+}
+
+/// Suppress rumble for CPU entries so connected-but-unassigned controllers
+/// don't vibrate when CPUs get hit.
+#[skyline::hook(replace = ControlModule::set_rumble)]
+pub unsafe fn handle_set_rumble(
+    module_accessor: &mut BattleObjectModuleAccessor,
+    hash: u64,
+    idx: i32,
+    flag: bool,
+    kind: u32,
+) {
+    if is_training_mode() && is_fighter(module_accessor) {
+        let entry_id =
+            WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+        if entry_id > 0 && !doubles::is_human_entry(entry_id) {
+            return;
+        }
+    }
+    original!()(module_accessor, hash, idx, flag, kind)
+}
+
+/// Suppress hit rumble for CPU entries.
+#[skyline::hook(replace = ControlModule::request_rumble_hit)]
+pub unsafe fn handle_request_rumble_hit(
+    module_accessor: &mut BattleObjectModuleAccessor,
+) {
+    if is_training_mode() && is_fighter(module_accessor) {
+        let entry_id =
+            WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+        if entry_id > 0 && !doubles::is_human_entry(entry_id) {
+            return;
+        }
+    }
+    original!()(module_accessor)
 }
 
 #[skyline::hook(replace = CameraModule::req_quake)]
@@ -978,6 +1013,8 @@ pub fn training_mods() {
         // Save states
         handle_get_param_int,
         handle_set_dead_rumble,
+        handle_set_rumble,
+        handle_request_rumble_hit,
         handle_req_quake,
         // Mash attack
         handle_get_attack_air_kind,
@@ -1036,6 +1073,8 @@ pub fn training_mods() {
         // Doubles: safety hooks for Lua AI init (skip for unloaded characters)
         doubles::lua_ai_path_hook,
         doubles::lua_ai_init_hook,
+        // Doubles: skip AI think pipeline for human-controlled entries
+        doubles::lua_ai_orchestrator_hook,
         // Doubles: fix cloned character hash for entries 2/3 during CSS→training transition
         doubles::clone_write_hook,
         // Doubles: CSS team/solo toggle button handler

@@ -1132,6 +1132,11 @@ const OFFSET_LUA_AI_PATH_BUILDER: usize = 0x17e88d0;
 /// the character-specific GOT trampoline is null.
 const OFFSET_LUA_AI_INIT: usize = 0x2c9900;
 
+/// Offset of FUN_710064f820: Lua AI orchestrator — iterates all fighter entries
+/// and runs AI think (path_builder → ai_init → vtable tick) per entry per frame.
+/// Hooking here lets us skip the entire AI pipeline for human-controlled entries.
+const OFFSET_LUA_AI_ORCHESTRATOR: usize = 0x64f820;
+
 /// Offset of FUN_7101788260 (clone_write): writes ui_chara hash + fighter_kind to .bss.
 /// Training mode transition calls this 3x with the SAME config buffer (from CPU1),
 /// cloning CPU1's character to entries 1, 2, 3. Hook: for entries 2/3, replace
@@ -2281,6 +2286,43 @@ pub unsafe fn lua_ai_init_hook(lua_obj: *mut u8, resource: *mut u8) {
         return;
     }
     call_original!(lua_obj, resource)
+}
+
+/// Hook for FUN_710064f820 (lua_ai_orchestrator): skip the entire AI think
+/// pipeline for human-controlled entries by temporarily NULLing their agent
+/// pointers. The orchestrator naturally skips NULL entries.
+///
+/// Layout:
+///   ai_mgr + 0x28:   entry count (i32)
+///   ai_mgr + 0x4178: array of AI agent pointers (one per entry, 8 bytes each)
+///
+/// Entry 0 (P1) is left untouched — the post-loop section dereferences it
+/// unconditionally for button-mapping and training-mode command processing.
+#[skyline::hook(offset = OFFSET_LUA_AI_ORCHESTRATOR)]
+pub unsafe fn lua_ai_orchestrator_hook(ai_mgr: *mut u8) {
+    let entry_base = ai_mgr.add(0x4178) as *mut usize;
+    let count = *(ai_mgr.add(0x28) as *const i32);
+    let max = (count as usize).min(4);
+
+    // Save and NULL human entries (skip index 0 — post-loop dereferences it)
+    let mut saved: [(usize, usize); 3] = [(0, 0); 3];
+    let mut n = 0usize;
+    for i in 1..max {
+        let ptr = core::ptr::read_volatile(entry_base.add(i));
+        if ptr != 0 && is_human_entry(i as i32) {
+            saved[n] = (i, ptr);
+            n += 1;
+            core::ptr::write_volatile(entry_base.add(i), 0usize);
+        }
+    }
+
+    call_original!(ai_mgr);
+
+    // Restore pointers so other systems can still read them
+    for j in 0..n {
+        let (idx, val) = saved[j];
+        core::ptr::write_volatile(entry_base.add(idx), val);
+    }
 }
 
 /// Hook for FUN_7101788260 (clone_write): override config fields for entries 2/3
