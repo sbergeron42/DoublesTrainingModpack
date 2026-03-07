@@ -11,20 +11,46 @@ use crate::training::input_record;
 use crate::training::shield;
 use crate::training::{attack_angle, save_states};
 
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use training_mod_sync::*;
 
+const NUM_ENTRIES: usize = 4;
 const DISTANCE_CLOSE_THRESHOLD: f32 = 16.0;
 const DISTANCE_MID_THRESHOLD: f32 = 37.0;
 const DISTANCE_FAR_THRESHOLD: f32 = 64.0;
 
-static CURRENT_AERIAL: RwLock<Action> = RwLock::new(Action::NAIR);
-static QUEUE: RwLock<Vec<Action>> = RwLock::new(Vec::new());
-static FALLING_AERIAL: RwLock<bool> = RwLock::new(false);
-static AERIAL_DELAY: RwLock<u32> = RwLock::new(0);
-static IS_TRANSITIONING_DASH: RwLock<bool> = RwLock::new(false);
+/// Returns the current CPU entry index (0..3), clamped for array safety.
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
 
-static AERIAL_DELAY_COUNTER: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
+static CURRENT_AERIAL: [RwLock<Action>; NUM_ENTRIES] = [
+    RwLock::new(Action::NAIR), RwLock::new(Action::NAIR),
+    RwLock::new(Action::NAIR), RwLock::new(Action::NAIR),
+];
+static QUEUE: [RwLock<Vec<Action>>; NUM_ENTRIES] = [
+    RwLock::new(Vec::new()), RwLock::new(Vec::new()),
+    RwLock::new(Vec::new()), RwLock::new(Vec::new()),
+];
+static FALLING_AERIAL: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+static AERIAL_DELAY: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
+static IS_TRANSITIONING_DASH: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+static AERIAL_DELAY_COUNTERS: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
 
 unsafe fn is_beginning_dash_attack(module_accessor: &mut app::BattleObjectModuleAccessor) -> bool {
     let current_status = StatusModule::status_kind(module_accessor);
@@ -40,16 +66,17 @@ unsafe fn is_beginning_dash_attack(module_accessor: &mut app::BattleObjectModule
 }
 
 unsafe fn dash_transition_check(module_accessor: &mut app::BattleObjectModuleAccessor) {
-    let mut is_transitioning_dash = lock_write(&IS_TRANSITIONING_DASH);
-    *is_transitioning_dash &= is_dashing_for_dash_attack(module_accessor);
+    let ei = eidx();
+    let val = IS_TRANSITIONING_DASH[ei].load(Ordering::Relaxed) && is_dashing_for_dash_attack(module_accessor);
+    IS_TRANSITIONING_DASH[ei].store(val, Ordering::Relaxed);
 }
 
 pub fn is_playback_queued() -> bool {
-    get_current_buffer().is_playback()
+    get_current_buffer(eidx()).is_playback()
 }
 
 pub fn queued_playback_slot() -> usize {
-    get_current_buffer().playback_slot()
+    get_current_buffer(eidx()).playback_slot()
 }
 
 pub unsafe fn is_dashing_for_dash_attack(
@@ -57,15 +84,14 @@ pub unsafe fn is_dashing_for_dash_attack(
 ) -> bool {
     let current_status = StatusModule::status_kind(module_accessor);
     let is_dashing = current_status == *FIGHTER_STATUS_KIND_DASH;
-    let action = get_current_buffer();
-    // Return true if we're trying to dash attack and we're dashing
+    let action = get_current_buffer(eidx());
     action == Action::DASH_ATTACK && is_dashing
 }
 
 pub fn buffer_action(action: Action) {
-    let queue = lock_read(&QUEUE);
+    let ei = eidx();
+    let queue = lock_read(&QUEUE[ei]);
     if !queue.is_empty() {
-        // Something is already buffered
         return;
     }
     drop(queue);
@@ -74,9 +100,6 @@ pub fn buffer_action(action: Action) {
         return;
     }
 
-    // We want to allow for triggering a mash to end playback for neutral playbacks, but not for SDI/disadv playbacks
-    // exit playback if we want to perform mash actions out of it
-    // TODO: Figure out some way to deal with trying to playback into another playback
     unsafe {
         if current_profile().playback_mash == OnOff::ON
             && input_record::is_playback()
@@ -85,7 +108,6 @@ pub fn buffer_action(action: Action) {
             && !is_playback_queued()
             && !action.is_playback()
         {
-            // if we don't want to leave playback on mash actions, then don't perform the mash
             if input_record::is_playback() {
                 input_record::stop_playback();
                 return;
@@ -96,7 +118,7 @@ pub fn buffer_action(action: Action) {
     attack_angle::roll_direction();
     roll_aerial_delay(action);
 
-    let mut queue = lock_write(&QUEUE);
+    let mut queue = lock_write(&QUEUE[ei]);
     queue.insert(0, action);
     drop(queue);
     buffer_follow_up();
@@ -111,24 +133,30 @@ pub fn buffer_follow_up() {
 
     roll_aerial_delay(action);
 
-    let mut queue = lock_write(&QUEUE);
+    let mut queue = lock_write(&QUEUE[eidx()]);
     queue.insert(0, action);
     drop(queue);
 }
 
-pub fn get_current_buffer() -> Action {
-    let queue = lock_read(&QUEUE);
+fn get_current_buffer(ei: usize) -> Action {
+    let queue = lock_read(&QUEUE[ei]);
     *(queue.last().unwrap_or(&Action::empty()))
 }
 
+/// Public accessor for external callers (uses current entry context).
+pub fn get_current_buffer_ext() -> Action {
+    get_current_buffer(eidx())
+}
+
 pub fn reset() {
-    let mut queue = lock_write(&QUEUE);
+    let ei = eidx();
+    let mut queue = lock_write(&QUEUE[ei]);
     queue.pop();
     drop(queue);
 
-    shield::suspend_shield(get_current_buffer());
-    frame_counter::full_reset(*AERIAL_DELAY_COUNTER);
-    assign(&AERIAL_DELAY, 0);
+    shield::suspend_shield(get_current_buffer(ei));
+    frame_counter::full_reset(AERIAL_DELAY_COUNTERS[ei]);
+    AERIAL_DELAY[ei].store(0, Ordering::Relaxed);
 }
 
 pub fn full_reset() {
@@ -137,18 +165,18 @@ pub fn full_reset() {
 }
 
 pub fn clear_queue() {
-    assign(&QUEUE, Vec::new());
+    assign(&QUEUE[eidx()], Vec::new());
 }
 
 pub fn set_aerial(attack: Action) {
-    assign(&CURRENT_AERIAL, attack);
+    assign(&CURRENT_AERIAL[eidx()], attack);
 }
 
 pub fn get_attack_air_kind(module_accessor: &mut app::BattleObjectModuleAccessor) -> Option<i32> {
     if !is_operation_cpu(module_accessor) {
         return None;
     }
-    read(&CURRENT_AERIAL).into_attack_air_kind()
+    read(&CURRENT_AERIAL[eidx()]).into_attack_air_kind()
 }
 
 pub unsafe fn get_command_flag_cat(
@@ -192,7 +220,7 @@ unsafe fn get_buffered_action(
     if save_states::is_loading() {
         return None;
     }
-    let fighter_distance = get_fighter_distance();
+    let fighter_distance = get_fighter_distance_current_cpu();
     let prof = current_profile();
     if is_in_tech(module_accessor) {
         let action = prof.tech_action_override.get_random();
@@ -290,9 +318,9 @@ fn buffer_menu_mash(action: Action) {
     buffer_action(action);
     full_hop::roll_full_hop();
     fast_fall::roll_fast_fall();
-    assign(
-        &FALLING_AERIAL,
+    FALLING_AERIAL[eidx()].store(
         current_profile().falling_aerials.get_random().into_bool(),
+        Ordering::Relaxed,
     );
 }
 
@@ -302,7 +330,7 @@ pub fn external_buffer_menu_mash(action: Action) {
 }
 
 unsafe fn perform_action(module_accessor: &mut app::BattleObjectModuleAccessor) -> i32 {
-    let action = get_current_buffer();
+    let action = get_current_buffer(eidx());
     match action {
         Action::AIR_DODGE => {
             let (expected_status, command_flag) = if is_grounded(module_accessor) {
@@ -375,7 +403,7 @@ unsafe fn perform_action(module_accessor: &mut app::BattleObjectModuleAccessor) 
 }
 
 pub fn request_shield(module_accessor: &mut app::BattleObjectModuleAccessor) -> bool {
-    match get_current_buffer() {
+    match get_current_buffer(eidx()) {
         Action::SHIELD => true,
         Action::AIR_DODGE => is_grounded(module_accessor),
         _ => false,
@@ -489,10 +517,10 @@ unsafe fn get_attack_flag(
 
             if current_status == *FIGHTER_STATUS_KIND_DASH && motion_frame == 0.0 && is_motion_dash
             {
-                let mut is_transitioning_dash = lock_write(&IS_TRANSITIONING_DASH);
-                if !*is_transitioning_dash {
+                let ei = eidx();
+                if !IS_TRANSITIONING_DASH[ei].load(Ordering::Relaxed) {
                     // The first time these conditions are met, we aren't ready to begin dash attacking, so get ready to transition next frame
-                    *is_transitioning_dash = true;
+                    IS_TRANSITIONING_DASH[ei].store(true, Ordering::Relaxed);
                 } else {
                     // Begin dash attacking now that we've dashed for one frame
                     StatusModule::change_status_request_from_script(module_accessor, status, true);
@@ -526,7 +554,7 @@ unsafe fn get_aerial_flag(
 
     let status = *FIGHTER_STATUS_KIND_ATTACK_AIR;
 
-    if read(&FALLING_AERIAL) && !fast_fall::is_falling(module_accessor) {
+    if FALLING_AERIAL[eidx()].load(Ordering::Relaxed) && !fast_fall::is_falling(module_accessor) {
         return flag;
     }
 
@@ -557,14 +585,15 @@ fn roll_aerial_delay(action: Action) {
         return;
     }
 
-    assign(
-        &AERIAL_DELAY,
+    AERIAL_DELAY[eidx()].store(
         current_profile().aerial_delay.get_random().into_delay(),
+        Ordering::Relaxed,
     );
 }
 
 fn should_delay_aerial(module_accessor: &mut app::BattleObjectModuleAccessor) -> bool {
-    let aerial_delay = read(&AERIAL_DELAY);
+    let ei = eidx();
+    let aerial_delay = AERIAL_DELAY[ei].load(Ordering::Relaxed);
     if aerial_delay == 0 {
         return false;
     }
@@ -581,7 +610,7 @@ fn should_delay_aerial(module_accessor: &mut app::BattleObjectModuleAccessor) ->
             return true;
         }
     }
-    frame_counter::should_delay(aerial_delay, *AERIAL_DELAY_COUNTER)
+    frame_counter::should_delay(aerial_delay, AERIAL_DELAY_COUNTERS[ei])
 }
 
 /**

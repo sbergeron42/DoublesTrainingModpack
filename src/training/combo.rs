@@ -9,12 +9,14 @@ use crate::training::frame_counter;
 use crate::training::ui::notifications;
 use crate::try_get_module_accessor;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use training_mod_consts::{current_profile, FighterId, OnOff, MENU};
 use training_mod_sync::*;
 
-static PLAYER_WAS_ACTIONABLE: RwLock<bool> = RwLock::new(false);
-static CPU_WAS_ACTIONABLE: RwLock<bool> = RwLock::new(false);
-static IS_COUNTING: RwLock<bool> = RwLock::new(false);
+static PLAYER_WAS_ACTIONABLE: AtomicBool = AtomicBool::new(false);
+static CPU_WAS_ACTIONABLE: AtomicBool = AtomicBool::new(false);
+static IS_COUNTING: AtomicBool = AtomicBool::new(false);
 
 static PLAYER_FRAME_COUNTER_INDEX: LazyLock<usize> =
     LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
@@ -79,10 +81,10 @@ pub unsafe fn once_per_frame(module_accessor: &mut BattleObjectModuleAccessor) {
     let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
         .expect("Could not get CPU module accessor in once_per_frame");
     let player_is_actionable = is_actionable(player_module_accessor);
-    let player_was_actionable = read(&PLAYER_WAS_ACTIONABLE);
+    let player_was_actionable = PLAYER_WAS_ACTIONABLE.load(Ordering::Relaxed);
     let player_just_actionable = !player_was_actionable && player_is_actionable;
     let cpu_is_actionable = is_actionable(cpu_module_accessor);
-    let cpu_was_actionable = read(&CPU_WAS_ACTIONABLE);
+    let cpu_was_actionable = CPU_WAS_ACTIONABLE.load(Ordering::Relaxed);
     let cpu_just_actionable = !cpu_was_actionable && cpu_is_actionable;
 
     // Lock in frames
@@ -113,7 +115,7 @@ pub unsafe fn once_per_frame(module_accessor: &mut BattleObjectModuleAccessor) {
             *COLLISION_KIND_MASK_HIT | *COLLISION_KIND_MASK_SHIELD,
         ) || StatusModule::status_kind(player_module_accessor) == *FIGHTER_STATUS_KIND_THROW
         {
-            if !read(&IS_COUNTING) {
+            if !IS_COUNTING.load(Ordering::Relaxed) {
                 // Start counting when the player lands a hit
                 info!("Starting frame counter");
             } else {
@@ -127,10 +129,10 @@ pub unsafe fn once_per_frame(module_accessor: &mut BattleObjectModuleAccessor) {
             frame_counter::reset_frame_count(*CPU_FRAME_COUNTER_INDEX);
             frame_counter::start_counting(*PLAYER_FRAME_COUNTER_INDEX);
             frame_counter::start_counting(*CPU_FRAME_COUNTER_INDEX);
-            assign(&IS_COUNTING, true);
+            IS_COUNTING.store(true, Ordering::Relaxed);
         }
     } else if player_is_actionable && cpu_is_actionable {
-        if read(&IS_COUNTING) {
+        if IS_COUNTING.load(Ordering::Relaxed) {
             let frame_advantage = frame_counter::get_frame_count(*CPU_FRAME_COUNTER_INDEX) as i32
                 - frame_counter::get_frame_count(*PLAYER_FRAME_COUNTER_INDEX) as i32;
             info!(
@@ -140,12 +142,12 @@ pub unsafe fn once_per_frame(module_accessor: &mut BattleObjectModuleAccessor) {
             update_frame_advantage(frame_advantage);
             frame_counter::reset_frame_count(*PLAYER_FRAME_COUNTER_INDEX);
             frame_counter::reset_frame_count(*CPU_FRAME_COUNTER_INDEX);
-            assign(&IS_COUNTING, false);
+            IS_COUNTING.store(false, Ordering::Relaxed);
         }
     } else {
         // No need to start or stop counting, one of the fighters is still not actionable
     }
 
-    assign(&CPU_WAS_ACTIONABLE, cpu_is_actionable);
-    assign(&PLAYER_WAS_ACTIONABLE, player_is_actionable);
+    CPU_WAS_ACTIONABLE.store(cpu_is_actionable, Ordering::Relaxed);
+    PLAYER_WAS_ACTIONABLE.store(player_is_actionable, Ordering::Relaxed);
 }

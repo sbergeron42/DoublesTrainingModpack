@@ -1,10 +1,11 @@
 use std::ptr::addr_of_mut;
 
 use crate::common::button_config;
-use crate::common::consts::{BuffOption, FighterId, MENU, CURRENT_CPU_ENTRY_ID, current_profile};
+use crate::common::consts::{BuffOption, FighterId, MENU, CURRENT_CPU_ENTRY_ID, current_profile, refresh_current_profile};
 use crate::common::offsets::*;
 use crate::common::{
-    dev_config, is_operation_cpu, is_training_mode, menu, try_get_module_accessor, PauseMenu,
+    dev_config, is_operation_cpu, is_training_mode, menu, refresh_is_training_mode,
+    refresh_is_operation_cpu, try_get_module_accessor, PauseMenu,
     FIGHTER_MANAGER_ADDR, ITEM_MANAGER_ADDR, STAGE_MANAGER_ADDR, TRAINING_MENU_ADDR,
 };
 use crate::hitbox_visualizer;
@@ -58,7 +59,11 @@ pub unsafe fn handle_get_param_float(
     param_hash: u64,
 ) -> f32 {
     let ori = original!()(module_accessor, param_type, param_hash);
-    if !is_training_mode() {
+
+    // This hook fires hundreds of times per frame per fighter (physics params).
+    // Gate on training mode (atomic load) and param_type (u64 compare) first —
+    // shield logic only cares about hash40("common") params, which is ~5% of calls.
+    if !is_training_mode() || param_type != smash::hash40("common") {
         return ori;
     }
 
@@ -87,6 +92,7 @@ pub unsafe fn handle_get_attack_air_kind(module_accessor: &mut BattleObjectModul
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     if input_record::is_playback() {
         return ori;
     }
@@ -100,10 +106,13 @@ pub unsafe fn handle_get_command_flag_cat(
 ) -> i32 {
     let mut flag = original!()(module_accessor, category);
 
-    // this must be run even outside of training mode
-    // because otherwise it won't reset the shield_damage_mul
-    // back to "normal" once you leave training mode.
+    // Refresh cached is_training_mode once per fighter per frame (cat1 only).
+    // This single FFI call replaces hundreds of downstream FFI calls.
     if category == FIGHTER_PAD_COMMAND_CATEGORY1 {
+        refresh_is_training_mode();
+        // this must be run even outside of training mode
+        // because otherwise it won't reset the shield_damage_mul
+        // back to "normal" once you leave training mode.
         shield::param_installer();
     }
 
@@ -111,13 +120,22 @@ pub unsafe fn handle_get_command_flag_cat(
         return flag;
     }
 
+    // Set entry ID BEFORE any per-CPU logic so eidx() returns the correct fighter
+    set_current_entry_id(module_accessor);
+
     flag |= mash::get_command_flag_cat(module_accessor, category);
-    // Get throw directions
     flag |= throw::get_command_flag_throw_direction(module_accessor);
 
     once_per_frame_per_fighter(module_accessor, category);
 
     flag
+}
+
+/// Sets CURRENT_CPU_ENTRY_ID from a module_accessor so eidx() returns the correct fighter.
+/// Must be called at the top of every hook that uses per-entry state.
+pub unsafe fn set_current_entry_id(module_accessor: &mut BattleObjectModuleAccessor) {
+    let entry_id = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+    CURRENT_CPU_ENTRY_ID.store(entry_id, core::sync::atomic::Ordering::Relaxed);
 }
 
 fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, category: i32) {
@@ -126,15 +144,22 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
     }
 
     unsafe {
-        // Track module_accessor addresses per entry for diagnostic cross-referencing.
         doubles::track_boma_address(module_accessor);
 
-        // Sync team battle flag once per frame (entry 0 only).
         let entry_id = WorkModule::get_int(
             module_accessor,
             *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID,
         );
         CURRENT_CPU_ENTRY_ID.store(entry_id, core::sync::atomic::Ordering::Relaxed);
+
+        // Cache is_operation_cpu for this fighter — one real computation per fighter per frame,
+        // all subsequent reads from any hook are a single atomic load.
+        refresh_is_operation_cpu(module_accessor);
+
+        // Cache the profile for this entry — one MENU+PROFILES read per fighter per frame,
+        // all subsequent current_profile() calls read from a small per-entry cache.
+        refresh_current_profile(entry_id);
+
         if entry_id == 0 {
             doubles::sync_team_battle_flag();
         }
@@ -143,12 +168,9 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             menu::spawn_menu();
         }
 
-        // Assign each fighter its own hit-team so all hitboxes interact in doubles.
-        // Must run for ALL fighters (including teammate/P2), not just CPUs.
         doubles::set_cpu_hit_team(module_accessor);
 
         if is_operation_cpu(module_accessor) {
-            // Handle dodge staling here b/c input recording or mash can cause dodging
             WorkModule::set_flag(
                 module_accessor,
                 !(current_profile().stale_dodges.as_bool()),
@@ -158,7 +180,6 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
             frame_counter::tick_ingame();
             tech::hide_tech();
         }
-
 
         combo::once_per_frame(module_accessor);
         hitbox_visualizer::get_command_flag_cat(module_accessor);
@@ -216,6 +237,7 @@ pub unsafe fn get_stick_x(module_accessor: &mut BattleObjectModuleAccessor) -> f
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     air_dodge_direction::mod_get_stick_x(module_accessor).unwrap_or(ori)
 }
 
@@ -239,6 +261,7 @@ pub unsafe fn get_stick_dir(module_accessor: &mut BattleObjectModuleAccessor) ->
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     attack_angle::mod_get_stick_dir(module_accessor).unwrap_or(ori)
 }
 
@@ -254,6 +277,7 @@ pub unsafe fn get_stick_y(module_accessor: &mut BattleObjectModuleAccessor) -> f
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     air_dodge_direction::mod_get_stick_y(module_accessor)
         .unwrap_or_else(|| crouch::mod_get_stick_y(module_accessor).unwrap_or(ori))
 }
@@ -268,6 +292,7 @@ pub unsafe fn handle_check_button_on(
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     shield::check_button_on(module_accessor, button)
         .unwrap_or_else(|| full_hop::check_button_on(module_accessor, button).unwrap_or(ori))
 }
@@ -282,6 +307,7 @@ pub unsafe fn handle_check_button_off(
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     shield::check_button_off(module_accessor, button)
         .unwrap_or_else(|| full_hop::check_button_off(module_accessor, button).unwrap_or(ori))
 }
@@ -298,6 +324,7 @@ pub unsafe fn handle_change_motion(
     unk6: bool,
 ) -> u64 {
     let mod_motion_kind = if is_training_mode() {
+        set_current_entry_id(module_accessor);
         tech::change_motion(module_accessor, motion_kind).unwrap_or(motion_kind)
     } else {
         motion_kind
@@ -331,6 +358,7 @@ pub unsafe fn handle_is_enable_transition_term(
         return ori;
     }
 
+    set_current_entry_id(module_accessor);
     match ledge::is_enable_transition_term(module_accessor, transition_term) {
         Some(r) => r,
         None => ori,
@@ -844,6 +872,11 @@ unsafe fn handle_final_input_mapping(
     // This ensures the profile follows the physical controller regardless of
     // which player_idx slot it occupies during CSS vs training.
     doubles::save_ctrl_mapping(npad, mappings.add(player_idx as usize));
+
+    // Refresh training mode cache early — FIM fires before handle_get_command_flag_cat.
+    if player_idx == 0 {
+        refresh_is_training_mode();
+    }
 
     if !is_training_mode() {
         return;

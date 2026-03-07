@@ -2,22 +2,40 @@ use smash::app::{self, lua_bind::*};
 use smash::lib::lua_const::*;
 use smash::phx::{Hash40, Vector3f};
 
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 use crate::common::*;
+use crate::common::consts::CURRENT_CPU_ENTRY_ID;
 use crate::training::{frame_counter, input_record};
 
 use training_mod_sync::*;
 
-static DELAY: RwLock<u32> = RwLock::new(0);
-static FAST_FALL: RwLock<bool> = RwLock::new(false);
-static FRAME_COUNTER_INDEX: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
+static DELAY: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
+static FAST_FALL: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+static FRAME_COUNTER_INDICES: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
 
 fn should_fast_fall() -> bool {
-    read(&FAST_FALL)
+    FAST_FALL[eidx()].load(Ordering::Relaxed)
 }
 
 pub fn roll_fast_fall() {
-    assign(&FAST_FALL, current_profile().fast_fall.get_random().into_bool());
+    FAST_FALL[eidx()].store(current_profile().fast_fall.get_random().into_bool(), Ordering::Relaxed);
 }
 
 pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
@@ -37,11 +55,12 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
     unsafe {
         if !is_falling(module_accessor) {
             // Roll FF delay
-            assign(
-                &DELAY,
+            let ei = eidx();
+            DELAY[ei].store(
                 current_profile().fast_fall_delay.get_random().into_delay(),
+                Ordering::Relaxed,
             );
-            frame_counter::full_reset(*FRAME_COUNTER_INDEX);
+            frame_counter::full_reset(FRAME_COUNTER_INDICES[ei]);
             return;
         }
 
@@ -55,8 +74,9 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
         }
 
         // Check delay
-        let delay = read(&DELAY);
-        if frame_counter::should_delay(delay, *FRAME_COUNTER_INDEX) {
+        let ei = eidx();
+        let delay = DELAY[ei].load(Ordering::Relaxed);
+        if frame_counter::should_delay(delay, FRAME_COUNTER_INDICES[ei]) {
             return;
         }
 

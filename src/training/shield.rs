@@ -6,41 +6,67 @@ use smash::lib::lua_const::*;
 use smash::lib::L2CValue;
 use smash::lua2cpp::L2CFighterCommon;
 
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 use crate::common::consts::*;
 use crate::common::*;
 use crate::training::{frame_counter, input_record, mash, save_states};
 
 use training_mod_sync::*;
 
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
 // TODO!() We only reset this on save state load or LRA reset
 // How many hits to hold shield until picking an Out Of Shield option
-static MULTI_HIT_OFFSET: RwLock<u32> = RwLock::new(0);
+static MULTI_HIT_OFFSET: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
 
 // The current set delay
-static SHIELD_DELAY: RwLock<u32> = RwLock::new(0);
+static SHIELD_DELAY: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
 
 // Used to only decrease once per shieldstun change
-static WAS_IN_SHIELDSTUN: RwLock<bool> = RwLock::new(false);
+static WAS_IN_SHIELDSTUN: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
 
 // For how many frames should the shield hold be overwritten
-static SUSPEND_SHIELD: RwLock<bool> = RwLock::new(false);
+static SUSPEND_SHIELD: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
 
 // Toggle for shield decay
-static SHIELD_DECAY: RwLock<bool> = RwLock::new(false);
+static SHIELD_DECAY: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
 
 /// This is the cached shield damage multiplier.
 /// Vanilla is 1.19, but mods can change this.
 static CACHED_SHIELD_DAMAGE_MUL: RwLock<Option<f32>> = RwLock::new(None);
 
-static REACTION_COUNTER_INDEX: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
+static REACTION_COUNTER_INDICES: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
 
 fn set_shield_decay(value: bool) {
-    assign(&SHIELD_DECAY, value);
+    SHIELD_DECAY[eidx()].store(value, Ordering::Relaxed);
 }
 
 fn should_pause_shield_decay() -> bool {
-    !read(&SHIELD_DECAY)
+    !SHIELD_DECAY[eidx()].load(Ordering::Relaxed)
 }
 
 fn reset_oos_offset() {
@@ -48,43 +74,42 @@ fn reset_oos_offset() {
      * Need to offset by 1, since we decrease as soon as shield gets hit
      * but only check later if we can OOS
      */
-    assign(
-        &MULTI_HIT_OFFSET,
+    MULTI_HIT_OFFSET[eidx()].store(
         current_profile().oos_offset.get_random().into_delay() + 1,
+        Ordering::Relaxed,
     );
 }
 
 fn handle_oos_offset(module_accessor: &mut app::BattleObjectModuleAccessor) {
+    let ei = eidx();
     // Check if we are currently in shield stun
-    let mut was_in_shieldstun_lock = lock_write(&WAS_IN_SHIELDSTUN);
     if !is_in_shieldstun(module_accessor) {
-        // Make sure we don't forget and wait until we get hit on shield
-        *was_in_shieldstun_lock = false;
+        WAS_IN_SHIELDSTUN[ei].store(false, Ordering::Relaxed);
         return;
     }
 
     // Make sure we just freshly entered shield stun
-    if *was_in_shieldstun_lock {
+    if WAS_IN_SHIELDSTUN[ei].load(Ordering::Relaxed) {
         return;
     }
 
     // Roll shield delay
-    assign(
-        &SHIELD_DELAY,
+    SHIELD_DELAY[ei].store(
         current_profile().reaction_time.get_random().into_delay(),
+        Ordering::Relaxed,
     );
 
     // Decrease offset once if needed
-    let mut multi_hit_offset_lock = lock_write(&MULTI_HIT_OFFSET);
-    *multi_hit_offset_lock = (*multi_hit_offset_lock).saturating_sub(1);
+    let prev = MULTI_HIT_OFFSET[ei].load(Ordering::Relaxed);
+    MULTI_HIT_OFFSET[ei].store(prev.saturating_sub(1), Ordering::Relaxed);
 
     // Mark that we were in shield stun, so we don't decrease again
-    *was_in_shieldstun_lock = true;
+    WAS_IN_SHIELDSTUN[ei].store(true, Ordering::Relaxed);
 }
 
 pub fn allow_oos() -> bool {
     // Delay OOS until offset hits 0
-    read(&MULTI_HIT_OFFSET) == 0
+    MULTI_HIT_OFFSET[eidx()].load(Ordering::Relaxed) == 0
 }
 
 pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
@@ -97,6 +122,11 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
         reset_oos_offset();
     }
 
+    // Track shieldstun transitions for OOS timing (once per CPU per frame).
+    if current_profile().shield_state != Shield::NONE {
+        handle_oos_offset(module_accessor);
+    }
+
     // Reset when not shielding
     unsafe {
         let status_kind = StatusModule::status_kind(module_accessor);
@@ -106,20 +136,19 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
     }
 }
 
+/// Called from handle_get_param_float ONLY for param_type == hash40("common").
+/// The caller already gates on is_training_mode() and param_type, so this
+/// only needs to check the shield-specific conditions.
 pub unsafe fn get_param_float(
     module_accessor: &mut app::BattleObjectModuleAccessor,
     param_type: u64,
     param_hash: u64,
 ) -> Option<f32> {
     if !is_operation_cpu(module_accessor) || input_record::is_playback() {
-        // shield normally during playback
         return None;
     }
 
-    if current_profile().shield_state != Shield::NONE {
-        handle_oos_offset(module_accessor);
-    }
-
+    crate::training::set_current_entry_id(module_accessor);
     handle_shield_decay(param_type, param_hash)
 }
 
@@ -201,6 +230,7 @@ pub unsafe fn handle_sub_guard_cont(fighter: &mut L2CFighterCommon) -> L2CValue 
 
 unsafe fn mod_handle_sub_guard_cont(fighter: &mut L2CFighterCommon) {
     let module_accessor = sv_system::battle_object_module_accessor(fighter.lua_state_agent);
+    crate::training::set_current_entry_id(module_accessor);
     if !is_operation_cpu(module_accessor) {
         return;
     }
@@ -220,11 +250,13 @@ unsafe fn mod_handle_sub_guard_cont(fighter: &mut L2CFighterCommon) {
     }
 
     if !is_shielding(module_accessor) {
-        frame_counter::full_reset(*REACTION_COUNTER_INDEX);
+        let ei = eidx();
+        frame_counter::full_reset(REACTION_COUNTER_INDICES[ei]);
         return;
     }
 
-    if frame_counter::should_delay(read(&SHIELD_DELAY), *REACTION_COUNTER_INDEX) {
+    let ei = eidx();
+    if frame_counter::should_delay(SHIELD_DELAY[ei].load(Ordering::Relaxed), REACTION_COUNTER_INDICES[ei]) {
         return;
     }
 
@@ -241,7 +273,7 @@ unsafe fn mod_handle_sub_guard_cont(fighter: &mut L2CFighterCommon) {
         }
     }
 
-    let action = mash::get_current_buffer();
+    let action = mash::get_current_buffer_ext();
 
     if handle_escape_option(fighter, module_accessor) {
         return;
@@ -297,7 +329,7 @@ unsafe fn handle_escape_option(
         return false;
     }
 
-    match mash::get_current_buffer() {
+    match mash::get_current_buffer_ext() {
         Action::SPOT_DODGE => {
             fighter
                 .fighter_base
@@ -324,7 +356,7 @@ unsafe fn handle_escape_option(
  * Needed to allow these attacks to work OOS
  */
 fn needs_oos_handling_drop_shield() -> bool {
-    let action = mash::get_current_buffer();
+    let action = mash::get_current_buffer_ext();
 
     if action == Action::JUMP {
         return true;
@@ -381,7 +413,7 @@ pub fn is_aerial(action: Action) -> bool {
 
 // Needed for shield drop options
 pub fn suspend_shield(action: Action) {
-    assign(&SUSPEND_SHIELD, need_suspend_shield(action));
+    SUSPEND_SHIELD[eidx()].store(need_suspend_shield(action), Ordering::Relaxed);
 }
 
 fn need_suspend_shield(action: Action) -> bool {
@@ -404,7 +436,7 @@ fn need_suspend_shield(action: Action) -> bool {
  * Needed for these options to work OOS
  */
 fn shield_is_suspended() -> bool {
-    read(&SUSPEND_SHIELD)
+    SUSPEND_SHIELD[eidx()].load(Ordering::Relaxed)
 }
 
 /**

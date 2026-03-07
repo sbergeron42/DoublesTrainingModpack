@@ -29,12 +29,28 @@ pub static mut TRAINING_MENU_ADDR: *mut PauseMenu = core::ptr::null_mut();
 #[cfg(not(feature = "outside_training_mode"))]
 extern "C" {
     #[link_name = "\u{1}_ZN3app9smashball16is_training_modeEv"]
-    pub fn is_training_mode() -> bool;
+    fn is_training_mode_ffi() -> bool;
 }
 
 #[cfg(feature = "outside_training_mode")]
-pub fn is_training_mode() -> bool {
+fn is_training_mode_ffi() -> bool {
     true
+}
+
+/// Cached result of `is_training_mode()`. Updated once per frame via `refresh_is_training_mode()`.
+/// This eliminates hundreds of FFI calls per frame since every hook checks this.
+static IS_TRAINING_CACHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Read the cached training mode flag. Zero-cost compared to the FFI call.
+pub fn is_training_mode() -> bool {
+    IS_TRAINING_CACHED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Refresh the cached training mode flag from the game's FFI function.
+/// Must be called once per frame from a hook that fires reliably (e.g. handle_get_command_flag_cat).
+pub fn refresh_is_training_mode() {
+    let val = unsafe { is_training_mode_ffi() };
+    IS_TRAINING_CACHED.store(val, core::sync::atomic::Ordering::Relaxed);
 }
 
 #[repr(C)]
@@ -87,7 +103,46 @@ pub fn is_fighter(module_accessor: &app::BattleObjectModuleAccessor) -> bool {
     get_category(module_accessor) == BATTLE_OBJECT_CATEGORY_FIGHTER
 }
 
+/// Cached results of `is_operation_cpu()` per fighter entry (0–3).
+/// Updated once per fighter per frame via `refresh_is_operation_cpu()`.
+static IS_OP_CPU_CACHED: [core::sync::atomic::AtomicBool; 4] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+];
+
+/// Refresh the cached is_operation_cpu result for a specific fighter.
+/// Called once per fighter per frame from `once_per_frame_per_fighter`.
+pub fn refresh_is_operation_cpu(module_accessor: &mut app::BattleObjectModuleAccessor) {
+    let val = is_operation_cpu_inner(module_accessor);
+    unsafe {
+        let entry_id =
+            WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+        if (0..4).contains(&entry_id) {
+            IS_OP_CPU_CACHED[entry_id as usize].store(val, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 pub fn is_operation_cpu(module_accessor: &mut app::BattleObjectModuleAccessor) -> bool {
+    // Fast path: if this is a fighter in training mode, read from cache.
+    if is_training_mode() && is_fighter(module_accessor) {
+        unsafe {
+            let entry_id =
+                WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
+            if (0..4).contains(&entry_id) {
+                return IS_OP_CPU_CACHED[entry_id as usize]
+                    .load(core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    // Fallback for non-fighters, out-of-range entry IDs, or non-training mode
+    is_operation_cpu_inner(module_accessor)
+}
+
+/// The actual computation — only called during cache refresh or fallback.
+fn is_operation_cpu_inner(module_accessor: &mut app::BattleObjectModuleAccessor) -> bool {
     unsafe {
         if !is_fighter(module_accessor) {
             return false;
@@ -304,13 +359,32 @@ pub unsafe fn get_player_dmg_digits(p: FighterId) -> (u8, u8, u8, u8) {
 }
 
 pub unsafe fn get_fighter_distance() -> f32 {
+    get_fighter_distance_for_entry(FighterId::CPU)
+}
+
+/// Get the distance from P1 to the CPU currently being processed.
+pub unsafe fn get_fighter_distance_current_cpu() -> f32 {
+    let entry_id = CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed);
+    let fighter_id = match entry_id {
+        0 => FighterId::Player,
+        1 => FighterId::CPU,
+        2 => FighterId::CPU2,
+        3 => FighterId::CPU3,
+        _ => FighterId::CPU,
+    };
+    get_fighter_distance_for_entry(fighter_id)
+}
+
+unsafe fn get_fighter_distance_for_entry(cpu_id: FighterId) -> f32 {
     let player_module_accessor = try_get_module_accessor(FighterId::Player)
         .expect("Could not get player_module_accessor in get_fighter_distance");
     if StatusModule::status_kind(player_module_accessor) == *FIGHTER_STATUS_KIND_NONE {
         return f32::MAX;
     }
-    let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
-        .expect("Could not get CPU module_accessor in get_fighter_distance");
+    let cpu_module_accessor = match try_get_module_accessor(cpu_id) {
+        Some(acc) => acc,
+        None => return f32::MAX,
+    };
     let player_pos = *PostureModule::pos(player_module_accessor);
     let cpu_pos = *PostureModule::pos(cpu_module_accessor);
     app::sv_math::vec3_distance(

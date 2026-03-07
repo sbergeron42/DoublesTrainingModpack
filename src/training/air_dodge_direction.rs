@@ -8,7 +8,15 @@ use crate::common::*;
 use crate::training::directional_influence::should_reverse_angle;
 use training_mod_sync::*;
 
-static AIRDODGE_STICK_DIRECTION: RwLock<Direction> = RwLock::new(Direction::empty());
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
+static AIRDODGE_STICK_DIRECTION: [RwLock<Direction>; NUM_ENTRIES] = [
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+];
 
 pub unsafe fn mod_get_stick_x(
     module_accessor: &mut app::BattleObjectModuleAccessor,
@@ -33,10 +41,10 @@ unsafe fn get_angle(module_accessor: &mut app::BattleObjectModuleAccessor) -> Op
     }
 
     assign(
-        &AIRDODGE_STICK_DIRECTION,
+        &AIRDODGE_STICK_DIRECTION[eidx()],
         current_profile().air_dodge_dir.get_random(),
     );
-    let direction = read(&AIRDODGE_STICK_DIRECTION);
+    let direction = read(&AIRDODGE_STICK_DIRECTION[eidx()]);
     direction.into_angle().map(|angle| {
         if !should_reverse_angle(direction) {
             // Direction is LEFT/RIGHT, so don't perform any adjustment

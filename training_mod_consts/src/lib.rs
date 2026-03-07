@@ -346,6 +346,16 @@ pub static DEFAULT_PROFILES: RwLock<[CpuProfile; MAX_PROFILES]> =
 
 pub static CURRENT_CPU_ENTRY_ID: AtomicI32 = AtomicI32::new(1);
 
+/// Per-entry profile cache. Updated once per fighter per frame via `refresh_current_profile()`.
+/// Reads are cheap (single RwLock on a small struct) compared to the uncached path
+/// which locks both MENU and PROFILES (two large-struct RwLocks) on every call.
+static PROFILE_CACHE: [RwLock<CpuProfile>; 4] = [
+    RwLock::new(BASE_PROFILE),
+    RwLock::new(BASE_PROFILE),
+    RwLock::new(BASE_PROFILE),
+    RwLock::new(BASE_PROFILE),
+];
+
 /// Get the profile for a given CPU entry ID (1-3).
 /// Always reads from PROFILES. Migration at load time ensures profiles
 /// are populated from old MENU settings if needed.
@@ -360,9 +370,24 @@ pub fn get_cpu_profile(entry_id: i32) -> CpuProfile {
     read(&PROFILES)[idx]
 }
 
+/// Refresh the cached profile for the given entry ID.
+/// Called once per fighter per frame from `once_per_frame_per_fighter`.
+pub fn refresh_current_profile(entry_id: i32) {
+    let profile = get_cpu_profile(entry_id);
+    if entry_id >= 0 && (entry_id as usize) < 4 {
+        assign(&PROFILE_CACHE[entry_id as usize], profile);
+    }
+}
+
 /// Get the profile for the current CPU being processed this frame.
+/// Reads from per-entry cache (one small RwLock) instead of recomputing
+/// from MENU + PROFILES (two large RwLocks) on every call.
 pub fn current_profile() -> CpuProfile {
-    get_cpu_profile(CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed))
+    let entry_id = CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed);
+    if entry_id >= 0 && (entry_id as usize) < 4 {
+        return read(&PROFILE_CACHE[entry_id as usize]);
+    }
+    get_cpu_profile(entry_id)
 }
 
 /// Construct a CpuProfile from MENU fields (used for migration from old format).

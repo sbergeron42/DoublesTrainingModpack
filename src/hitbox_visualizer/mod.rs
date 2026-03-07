@@ -134,19 +134,16 @@ pub unsafe fn generate_hitbox_effects(
 }
 
 pub unsafe fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
-    // Resume Effect AnimCMD incase we don't display hitboxes
-    MotionAnimcmdModule::set_sleep_effect(module_accessor, false);
-
     if read(&MENU).hitbox_vis == OnOff::OFF {
         return;
     }
 
     let status_kind = StatusModule::status_kind(module_accessor);
-    if (*FIGHTER_STATUS_KIND_CATCH..=*FIGHTER_STATUS_KIND_CATCH_TURN).contains(&status_kind) {
-        return;
-    }
-
-    if is_shielding(module_accessor) {
+    if (*FIGHTER_STATUS_KIND_CATCH..=*FIGHTER_STATUS_KIND_CATCH_TURN).contains(&status_kind)
+        || is_shielding(module_accessor)
+    {
+        // Resume effects when vis is ON but we skip hitbox drawing for this fighter
+        MotionAnimcmdModule::set_sleep_effect(module_accessor, false);
         return;
     }
 
@@ -196,7 +193,11 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModule
 #[skyline::hook(replace = sv_animcmd::ATTACK)]
 unsafe fn handle_attack(lua_state: u64) {
     if is_training_mode() {
-        mod_handle_attack(lua_state);
+        let dominated = current_profile().shield_state != Shield::INFINITE
+            && read(&MENU).hitbox_vis != OnOff::ON;
+        if !dominated {
+            mod_handle_attack(lua_state);
+        }
     }
 
     original!()(lua_state);
@@ -205,8 +206,7 @@ unsafe fn handle_attack(lua_state: u64) {
 unsafe fn mod_handle_attack(lua_state: u64) {
     let mut l2c_agent = L2CAgent::new(lua_state);
 
-    // necessary if param object fails
-    // hacky way of forcing no shield damage on all hitboxes
+    // Force no shield damage on all hitboxes for infinite shield.
     if current_profile().shield_state == Shield::INFINITE {
         let mut hitbox_params: Vec<L2CValue> =
             (0..36).map(|i| l2c_agent.pop_lua_stack(i + 1)).collect();
@@ -268,7 +268,7 @@ unsafe fn mod_handle_attack(lua_state: u64) {
 
 #[skyline::hook(replace = sv_animcmd::CATCH)]
 unsafe fn handle_catch(lua_state: u64) {
-    if is_training_mode() {
+    if is_training_mode() && read(&MENU).hitbox_vis == OnOff::ON {
         mod_handle_catch(lua_state);
     }
 
@@ -276,10 +276,6 @@ unsafe fn handle_catch(lua_state: u64) {
 }
 
 unsafe fn mod_handle_catch(lua_state: u64) {
-    if read(&MENU).hitbox_vis == OnOff::OFF {
-        return;
-    }
-
     // get all necessary grabbox params
     let mut l2c_agent = L2CAgent::new(lua_state);
     let id = l2c_agent.pop_lua_stack(1); // int

@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use smash::app::lua_bind::{ControlModule, EffectModule};
 use smash::app::BattleObjectModuleAccessor;
 use smash::lib::lua_const::*;
@@ -5,13 +7,23 @@ use smash::phx::{Hash40, Vector3f};
 
 use crate::common::consts::*;
 use crate::common::*;
-use training_mod_sync::*;
 
-static COUNTER: RwLock<u32> = RwLock::new(0);
-static CLATTER_STEP: RwLock<f32> = RwLock::new(8.0);
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
+static COUNTER: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
+static CLATTER_STEP: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0x41000000), AtomicU32::new(0x41000000),
+    AtomicU32::new(0x41000000), AtomicU32::new(0x41000000),
+];
 
 unsafe fn do_clatter_input(module_accessor: &mut BattleObjectModuleAccessor) {
-    let clatter_step = read(&CLATTER_STEP);
+    let clatter_step = f32::from_bits(CLATTER_STEP[eidx()].load(Ordering::Relaxed));
     ControlModule::add_clatter_time(module_accessor, -clatter_step, 0);
     let zeros = Vector3f {
         x: 0.0,
@@ -49,9 +61,10 @@ pub unsafe fn handle_clatter(module_accessor: &mut BattleObjectModuleAccessor) {
     }
     let repeat = current_profile().clatter_strength.into_u32();
 
-    let mut counter_lock = lock_write(&COUNTER);
-    *counter_lock = ((*counter_lock) + 1) % repeat;
-    if *counter_lock == repeat - 1 {
+    let ei = eidx();
+    let counter_val = (COUNTER[ei].load(Ordering::Relaxed) + 1) % repeat;
+    COUNTER[ei].store(counter_val, Ordering::Relaxed);
+    if counter_val == repeat - 1 {
         do_clatter_input(module_accessor);
     }
 }
@@ -74,7 +87,8 @@ pub unsafe fn hook_start_clatter(
     // Most of the time this is 8 frames, but could be less depending on
     // the status (e.g. freeze is 4 frames / input)
     if is_training_mode() && is_operation_cpu(module_accessor) {
-        assign(&CLATTER_STEP, manual_recovery_rate);
+        crate::training::set_current_entry_id(module_accessor);
+        CLATTER_STEP[eidx()].store(manual_recovery_rate.to_bits(), Ordering::Relaxed);
     }
     original!()(
         module_accessor,

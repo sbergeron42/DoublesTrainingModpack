@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use smash::app::{self, lua_bind::*};
 use smash::lib::lua_const::*;
 
@@ -7,42 +9,55 @@ use crate::training::{frame_counter, input_record, mash};
 
 use training_mod_sync::*;
 
-const NOT_SET: u32 = 9001;
-static LEDGE_DELAY: RwLock<u32> = RwLock::new(NOT_SET);
-static LEDGE_CASE: RwLock<LedgeOption> = RwLock::new(LedgeOption::empty());
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
 
-static LEDGE_DELAY_COUNTER: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
+const NOT_SET: u32 = 9001;
+static LEDGE_DELAY: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(NOT_SET), AtomicU32::new(NOT_SET),
+    AtomicU32::new(NOT_SET), AtomicU32::new(NOT_SET),
+];
+static LEDGE_CASE: [RwLock<LedgeOption>; NUM_ENTRIES] = [
+    RwLock::new(LedgeOption::empty()), RwLock::new(LedgeOption::empty()),
+    RwLock::new(LedgeOption::empty()), RwLock::new(LedgeOption::empty()),
+];
+
+static LEDGE_DELAY_COUNTERS: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
 
 pub fn reset_ledge_delay() {
-    let mut ledge_delay_lock = lock_write(&LEDGE_DELAY);
-    if *ledge_delay_lock != NOT_SET {
-        *ledge_delay_lock = NOT_SET;
-        frame_counter::full_reset(*LEDGE_DELAY_COUNTER);
+    let ei = eidx();
+    if LEDGE_DELAY[ei].load(Ordering::Relaxed) != NOT_SET {
+        LEDGE_DELAY[ei].store(NOT_SET, Ordering::Relaxed);
+        frame_counter::full_reset(LEDGE_DELAY_COUNTERS[ei]);
     }
 }
 
 pub fn reset_ledge_case() {
-    let mut ledge_case_lock = lock_write(&LEDGE_CASE);
+    let ei = eidx();
+    let mut ledge_case_lock = lock_write(&LEDGE_CASE[ei]);
     if *ledge_case_lock != LedgeOption::empty() {
-        // Don't roll another ledge option if one is already selected
         *ledge_case_lock = LedgeOption::empty();
     }
 }
 
 fn roll_ledge_delay() {
-    let mut ledge_delay_lock = lock_write(&LEDGE_DELAY);
-    if *ledge_delay_lock != NOT_SET {
-        // Don't roll another ledge delay if one is already selected
+    let ei = eidx();
+    if LEDGE_DELAY[ei].load(Ordering::Relaxed) != NOT_SET {
         return;
     }
-    *ledge_delay_lock = current_profile().ledge_delay.get_random().into_longdelay();
+    LEDGE_DELAY[ei].store(current_profile().ledge_delay.get_random().into_longdelay(), Ordering::Relaxed);
 }
 
 fn roll_ledge_case() {
-    // Don't re-roll if there is already a ledge option selected
-    // This prevents choosing a different ledge option during LedgeOption::WAIT
-    let mut ledge_case_lock = lock_write(&LEDGE_CASE);
+    let ei = eidx();
+    let mut ledge_case_lock = lock_write(&LEDGE_CASE[ei]);
     if *ledge_case_lock != LedgeOption::empty() {
         return;
     }
@@ -58,7 +73,7 @@ fn get_ledge_option() -> Option<Action> {
         None
     };
 
-    match read(&LEDGE_CASE) {
+    match read(&LEDGE_CASE[eidx()]) {
         LedgeOption::NEUTRAL => {
             if prof.ledge_neutral_override != Action::empty() {
                 override_action = Some(prof.ledge_neutral_override.get_random());
@@ -101,8 +116,9 @@ pub unsafe fn force_option(module_accessor: &mut app::BattleObjectModuleAccessor
     let flag_cliff =
         WorkModule::is_flag(module_accessor, *FIGHTER_INSTANCE_WORK_ID_FLAG_CATCH_CLIFF);
     let current_frame = MotionModule::frame(module_accessor) as i32;
-    let ledge_delay = read(&LEDGE_DELAY);
-    let ledge_case = read(&LEDGE_CASE);
+    let ei = eidx();
+    let ledge_delay = LEDGE_DELAY[ei].load(Ordering::Relaxed);
+    let ledge_case = read(&LEDGE_CASE[ei]);
     // Allow this because sometimes we want to make sure our NNSDK doesn't have
     // an erroneous definition
     #[allow(clippy::unnecessary_cast)]
@@ -147,7 +163,7 @@ pub unsafe fn force_option(module_accessor: &mut app::BattleObjectModuleAccessor
         return;
     }
 
-    if frame_counter::should_delay(ledge_delay, *LEDGE_DELAY_COUNTER) {
+    if frame_counter::should_delay(ledge_delay, LEDGE_DELAY_COUNTERS[ei]) {
         // Not yet time to perform the ledge action
         return;
     }
@@ -180,11 +196,12 @@ pub unsafe fn is_enable_transition_term(
     }
 
     // Disallow the default cliff-climb if we are waiting or we didn't get up during a recording
-    let ledge_case = read(&LEDGE_CASE);
-    let ledge_delay = read(&LEDGE_DELAY);
+    let ei = eidx();
+    let ledge_case = read(&LEDGE_CASE[ei]);
+    let ledge_delay = LEDGE_DELAY[ei].load(Ordering::Relaxed);
     if term == *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_CLIFF_CLIMB
         && ((ledge_case == LedgeOption::WAIT
-            || frame_counter::get_frame_count(*LEDGE_DELAY_COUNTER) < ledge_delay)
+            || frame_counter::get_frame_count(LEDGE_DELAY_COUNTERS[ei]) < ledge_delay)
             || (ledge_case.is_playback() && !input_record::is_playback()))
     {
         return Some(false);

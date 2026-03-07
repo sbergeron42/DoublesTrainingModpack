@@ -1,4 +1,5 @@
 use core::f64::consts::PI;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use smash::app::{self, lua_bind::*};
 use smash::Vector2f;
@@ -8,17 +9,28 @@ use crate::common::*;
 use crate::training::directional_influence;
 use training_mod_sync::*;
 
-static COUNTER: RwLock<u32> = RwLock::new(0);
-static DIRECTION: RwLock<Direction> = RwLock::new(Direction::NEUTRAL);
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
 
-// TODO! Bug - we only roll a new direction when loading a save state or on LRA reset
+static COUNTER: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0),
+];
+static DIRECTION: [RwLock<Direction>; NUM_ENTRIES] = [
+    RwLock::new(Direction::NEUTRAL), RwLock::new(Direction::NEUTRAL),
+    RwLock::new(Direction::NEUTRAL), RwLock::new(Direction::NEUTRAL),
+];
+
 pub fn roll_direction() {
-    assign(&COUNTER, 0);
-    assign(&DIRECTION, current_profile().sdi_state.get_random());
+    let ei = eidx();
+    COUNTER[ei].store(0, Ordering::Relaxed);
+    assign(&DIRECTION[ei], current_profile().sdi_state.get_random());
 }
 
 unsafe fn get_sdi_direction() -> Option<f64> {
-    let direction = read(&DIRECTION);
+    let direction = read(&DIRECTION[eidx()]);
     direction.into_angle().map(|angle| {
         if directional_influence::should_reverse_angle(direction) {
             PI - angle
@@ -38,10 +50,12 @@ pub unsafe fn check_hit_stop_delay_command(
     if !is_training_mode() || !is_operation_cpu(module_accessor) {
         return original!()(module_accessor, sdi_direction);
     }
+    crate::training::set_current_entry_id(module_accessor);
     let repeat = current_profile().sdi_strength.into_u32();
-    let mut counter_lock = lock_write(&COUNTER);
-    *counter_lock = (*counter_lock + 1) % repeat;
-    if *counter_lock == repeat - 1 {
+    let ei = eidx();
+    let counter_val = (COUNTER[ei].load(Ordering::Relaxed) + 1) % repeat;
+    COUNTER[ei].store(counter_val, Ordering::Relaxed);
+    if counter_val == repeat - 1 {
         if let Some(angle) = get_sdi_direction() {
             // If there is a non-neutral direction picked,
             // modify the SDI angle Vector2f as a side-effect

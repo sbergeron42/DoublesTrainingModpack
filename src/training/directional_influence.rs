@@ -9,12 +9,19 @@ use crate::common::consts::*;
 use crate::common::*;
 use training_mod_sync::*;
 
-static DI_CASE: RwLock<Direction> = RwLock::new(Direction::empty());
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
+static DI_CASE: [RwLock<Direction>; NUM_ENTRIES] = [
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+];
 
 pub fn roll_di_case() {
-    let mut di_case_lock = lock_write(&DI_CASE);
+    let mut di_case_lock = lock_write(&DI_CASE[eidx()]);
     if *di_case_lock != Direction::empty() {
-        // DI direction already selected, don't pick a new one
         return;
     }
     *di_case_lock = current_profile().di_state.get_random();
@@ -22,10 +29,9 @@ pub fn roll_di_case() {
 
 pub fn reset_di_case(module_accessor: &mut app::BattleObjectModuleAccessor) {
     if is_in_hitstun(module_accessor) {
-        // Don't reset the DI direction during hitstun
         return;
     }
-    let mut di_case_lock = lock_write(&DI_CASE);
+    let mut di_case_lock = lock_write(&DI_CASE[eidx()]);
     if *di_case_lock != Direction::empty() {
         *di_case_lock = Direction::empty();
     }
@@ -44,17 +50,19 @@ pub unsafe fn handle_correct_damage_vector_common(
 }
 
 unsafe fn mod_handle_di(fighter: &L2CFighterCommon, _arg1: L2CValue) {
+    let module_accessor = sv_system::battle_object_module_accessor(fighter.lua_state_agent);
+    crate::training::set_current_entry_id(module_accessor);
+
     if current_profile().di_state == Direction::empty() {
         return;
     }
 
-    let module_accessor = sv_system::battle_object_module_accessor(fighter.lua_state_agent);
     if !is_operation_cpu(module_accessor) {
         return;
     }
 
     roll_di_case();
-    let di_case = read(&DI_CASE);
+    let di_case = read(&DI_CASE[eidx()]);
     let angle_tuple = di_case.into_angle().map_or((0.0, 0.0), |angle| {
         let a = if should_reverse_angle(di_case) {
             PI - angle
@@ -69,8 +77,17 @@ unsafe fn mod_handle_di(fighter: &L2CFighterCommon, _arg1: L2CValue) {
 }
 
 pub fn should_reverse_angle(direction: Direction) -> bool {
-    let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
-        .expect("Could not get CPU module accessor in should_reverse_angle");
+    let cpu_id = match eidx() {
+        0 => FighterId::Player,
+        1 => FighterId::CPU,
+        2 => FighterId::CPU2,
+        3 => FighterId::CPU3,
+        _ => FighterId::CPU,
+    };
+    let cpu_module_accessor = match try_get_module_accessor(cpu_id) {
+        Some(acc) => acc,
+        None => return false,
+    };
     let player_module_accessor = try_get_module_accessor(FighterId::Player)
         .expect("Could not get player module accessor in should_reverse_angle");
     unsafe {

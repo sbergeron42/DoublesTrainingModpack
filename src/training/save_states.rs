@@ -471,7 +471,6 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
     }
 
     let selected_slot = get_slot();
-    let status = StatusModule::status_kind(module_accessor);
     let entry_id = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
 
     // Track which entries are actively processed by the game
@@ -488,21 +487,7 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
     let save_state = save_state_for_entry(entry_id, selected_slot);
 
     let fighter_kind = app::utility::get_kind(module_accessor);
-    let fighter_is_ptrainer = is_ptrainer(module_accessor);
-    let fighter_is_popo = fighter_kind == *FIGHTER_KIND_POPO; // For making sure Popo doesn't steal Nana's PosMove
-    let fighter_is_nana = fighter_kind == *FIGHTER_KIND_NANA; // Don't want Nana to reopen save states etc.
-    let fighter_is_buffable = [
-        *FIGHTER_KIND_BRAVE,
-        *FIGHTER_KIND_CLOUD,
-        *FIGHTER_KIND_JACK,
-        *FIGHTER_KIND_LITTLEMAC,
-        *FIGHTER_KIND_EDGE,
-        *FIGHTER_KIND_WIIFIT,
-        *FIGHTER_KIND_SHULK,
-        *FIGHTER_KIND_TANTAN,
-        *FIGHTER_KIND_WARIO,
-    ]
-    .contains(&fighter_kind);
+    let fighter_is_nana = fighter_kind == *FIGHTER_KIND_NANA;
 
     // Reset state
     let autoload_reset = read(&MENU).save_state_autoload == OnOff::ON
@@ -532,6 +517,31 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
         input_record::stop_playback();
         return;
     }
+
+    // NoAction fast path: skip expensive state machine setup.
+    // Only need to check save trigger; all other states need full context below.
+    if save_state.state == NoAction
+        && !button_config::combo_passes(button_config::ButtonCombo::SaveState)
+    {
+        return;
+    }
+
+    // Deferred setup — only computed when state machine is active or save triggered
+    let status = StatusModule::status_kind(module_accessor);
+    let fighter_is_ptrainer = is_ptrainer(module_accessor);
+    let fighter_is_popo = fighter_kind == *FIGHTER_KIND_POPO;
+    let fighter_is_buffable = [
+        *FIGHTER_KIND_BRAVE,
+        *FIGHTER_KIND_CLOUD,
+        *FIGHTER_KIND_JACK,
+        *FIGHTER_KIND_LITTLEMAC,
+        *FIGHTER_KIND_EDGE,
+        *FIGHTER_KIND_WIIFIT,
+        *FIGHTER_KIND_SHULK,
+        *FIGHTER_KIND_TANTAN,
+        *FIGHTER_KIND_WARIO,
+    ]
+    .contains(&fighter_kind);
 
     // Kill the fighter and move them to camera bounds
     // Note: Nana shouldn't control her state here. Popo will give a signal to have

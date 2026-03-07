@@ -47,27 +47,31 @@ pub fn reset_frame_count(index: usize) {
     (*counters_lock)[index].count = 0;
 }
 
+/// Resets count to 0 and stops counting in a single lock acquisition.
 pub fn full_reset(index: usize) {
-    reset_frame_count(index);
-    stop_counting(index);
+    let mut counters_lock = lock_write(&COUNTERS);
+    let counter = &mut (*counters_lock)[index];
+    counter.count = 0;
+    counter.should_count = false;
 }
 
-/**
- * Returns true until a certain number of frames have passed
- */
+/// Returns true until a certain number of frames have passed.
+/// Uses a single lock acquisition instead of separate get/start/reset calls.
 pub fn should_delay(delay: u32, index: usize) -> bool {
     if delay == 0 {
         return false;
     }
 
-    let current_frame = get_frame_count(index);
+    let mut counters_lock = lock_write(&COUNTERS);
+    let counter = &mut (*counters_lock)[index];
 
-    if current_frame == 0 {
-        start_counting(index);
+    if counter.count == 0 {
+        counter.should_count = true;
     }
 
-    if current_frame >= delay {
-        full_reset(index);
+    if counter.count >= delay {
+        counter.count = 0;
+        counter.should_count = false;
         return false;
     }
 

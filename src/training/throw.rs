@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use smash::app::{self, lua_bind::*};
 use smash::lib::lua_const::*;
 
@@ -7,63 +9,87 @@ use crate::training::frame_counter;
 use crate::training::mash;
 use training_mod_sync::*;
 
-const NOT_SET: u32 = 9001;
-static THROW_DELAY: RwLock<u32> = RwLock::new(NOT_SET);
-static PUMMEL_DELAY: RwLock<u32> = RwLock::new(NOT_SET);
-static THROW_CASE: RwLock<ThrowOption> = RwLock::new(ThrowOption::empty());
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
 
-static THROW_DELAY_COUNTER: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
-static PUMMEL_DELAY_COUNTER: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
+const NOT_SET: u32 = 9001;
+static THROW_DELAY: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(NOT_SET), AtomicU32::new(NOT_SET),
+    AtomicU32::new(NOT_SET), AtomicU32::new(NOT_SET),
+];
+static PUMMEL_DELAY: [AtomicU32; NUM_ENTRIES] = [
+    AtomicU32::new(NOT_SET), AtomicU32::new(NOT_SET),
+    AtomicU32::new(NOT_SET), AtomicU32::new(NOT_SET),
+];
+static THROW_CASE: [RwLock<ThrowOption>; NUM_ENTRIES] = [
+    RwLock::new(ThrowOption::empty()), RwLock::new(ThrowOption::empty()),
+    RwLock::new(ThrowOption::empty()), RwLock::new(ThrowOption::empty()),
+];
+
+static THROW_DELAY_COUNTERS: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
+static PUMMEL_DELAY_COUNTERS: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
 
 // Rolling Throw Delays and Pummel Delays separately
 
 pub fn reset_throw_delay() {
-    if read(&THROW_DELAY) != NOT_SET {
-        assign(&THROW_DELAY, NOT_SET);
-        frame_counter::full_reset(*THROW_DELAY_COUNTER);
+    let ei = eidx();
+    if THROW_DELAY[ei].load(Ordering::Relaxed) != NOT_SET {
+        THROW_DELAY[ei].store(NOT_SET, Ordering::Relaxed);
+        frame_counter::full_reset(THROW_DELAY_COUNTERS[ei]);
     }
 }
 
 pub fn reset_pummel_delay() {
-    if read(&PUMMEL_DELAY) != NOT_SET {
-        assign(&PUMMEL_DELAY, NOT_SET);
-        frame_counter::full_reset(*PUMMEL_DELAY_COUNTER);
+    let ei = eidx();
+    if PUMMEL_DELAY[ei].load(Ordering::Relaxed) != NOT_SET {
+        PUMMEL_DELAY[ei].store(NOT_SET, Ordering::Relaxed);
+        frame_counter::full_reset(PUMMEL_DELAY_COUNTERS[ei]);
     }
 }
 
 pub fn reset_throw_case() {
-    if read(&THROW_CASE) != ThrowOption::empty() {
-        // Don't roll another throw option if one is already selected
-        assign(&THROW_CASE, ThrowOption::empty());
+    let ei = eidx();
+    if read(&THROW_CASE[ei]) != ThrowOption::empty() {
+        assign(&THROW_CASE[ei], ThrowOption::empty());
     }
 }
 
 fn roll_throw_delay() {
-    if read(&THROW_DELAY) == NOT_SET {
-        // Only roll another throw delay if one is not already selected
-        assign(
-            &THROW_DELAY,
+    let ei = eidx();
+    if THROW_DELAY[ei].load(Ordering::Relaxed) == NOT_SET {
+        THROW_DELAY[ei].store(
             current_profile().throw_delay.get_random().into_meddelay(),
+            Ordering::Relaxed,
         );
     }
 }
 
 fn roll_pummel_delay() {
-    if read(&PUMMEL_DELAY) == NOT_SET {
-        // Don't roll another pummel delay if one is already selected
-        assign(
-            &PUMMEL_DELAY,
+    let ei = eidx();
+    if PUMMEL_DELAY[ei].load(Ordering::Relaxed) == NOT_SET {
+        PUMMEL_DELAY[ei].store(
             current_profile().pummel_delay.get_random().into_meddelay(),
+            Ordering::Relaxed,
         );
     }
 }
 
 fn roll_throw_case() {
-    if read(&THROW_CASE) == ThrowOption::empty() {
-        // Only re-roll if there is not already a throw option selected
-        assign(&THROW_CASE, current_profile().throw_state.get_random());
+    let ei = eidx();
+    if read(&THROW_CASE[ei]) == ThrowOption::empty() {
+        assign(&THROW_CASE[ei], current_profile().throw_state.get_random());
     }
 }
 
@@ -99,14 +125,16 @@ pub unsafe fn get_command_flag_throw_direction(
 
     roll_pummel_delay();
 
-    if read(&THROW_CASE) == ThrowOption::NONE {
+    let ei = eidx();
+
+    if read(&THROW_CASE[ei]) == ThrowOption::NONE {
         // Do nothing, but don't reroll the throw case.
         return 0;
     }
 
-    if frame_counter::should_delay(read(&THROW_DELAY), *THROW_DELAY_COUNTER) {
+    if frame_counter::should_delay(THROW_DELAY[ei].load(Ordering::Relaxed), THROW_DELAY_COUNTERS[ei]) {
         // Not yet time to perform the throw action
-        if frame_counter::should_delay(read(&PUMMEL_DELAY), *PUMMEL_DELAY_COUNTER) {
+        if frame_counter::should_delay(PUMMEL_DELAY[ei].load(Ordering::Relaxed), PUMMEL_DELAY_COUNTERS[ei]) {
             // And not yet time to pummel either, so don't do anything
             return 0;
         }
@@ -130,7 +158,7 @@ pub unsafe fn get_command_flag_throw_direction(
         module_accessor,
         *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_THROW_HI,
     ) {
-        let cmd = read(&THROW_CASE).into_cmd().unwrap_or(0);
+        let cmd = read(&THROW_CASE[ei]).into_cmd().unwrap_or(0);
         mash::external_buffer_menu_mash(current_profile().mash_state.get_random());
         return cmd;
     }

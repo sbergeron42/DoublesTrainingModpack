@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 
 use skyline::hooks::{getRegionAddress, Region};
@@ -16,17 +17,35 @@ use crate::common::*;
 use crate::training::{frame_counter, mash, save_states};
 use training_mod_sync::*;
 
-static TECH_ROLL_DIRECTION: RwLock<Direction> = RwLock::new(Direction::empty());
-static MISS_TECH_ROLL_DIRECTION: RwLock<Direction> = RwLock::new(Direction::empty());
-static NEEDS_VISIBLE: RwLock<bool> = RwLock::new(false);
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
+static TECH_ROLL_DIRECTION: [RwLock<Direction>; NUM_ENTRIES] = [
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+];
+static MISS_TECH_ROLL_DIRECTION: [RwLock<Direction>; NUM_ENTRIES] = [
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+    RwLock::new(Direction::empty()), RwLock::new(Direction::empty()),
+];
+static NEEDS_VISIBLE: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
 static DEFAULT_FIXED_CAM_CENTER: RwLock<Vector3f> = RwLock::new(Vector3f {
     x: 0.0,
     y: 0.0,
     z: 0.0,
 });
 
-static FRAME_COUNTER: LazyLock<usize> =
-    LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::InGame));
+static FRAME_COUNTERS: LazyLock<[usize; NUM_ENTRIES]> = LazyLock::new(|| [
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+    frame_counter::register_counter(frame_counter::FrameCounterType::InGame),
+]);
 
 unsafe fn is_enable_passive(module_accessor: &mut BattleObjectModuleAccessor) -> bool {
     let fighter = get_fighter_common_from_accessor(module_accessor);
@@ -55,6 +74,7 @@ unsafe fn mod_handle_change_status(
     unk: &mut L2CValue,
 ) {
     let module_accessor = sv_system::battle_object_module_accessor(fighter.lua_state_agent);
+    crate::training::set_current_entry_id(module_accessor);
     if !is_operation_cpu(module_accessor) {
         return;
     }
@@ -114,13 +134,13 @@ unsafe fn handle_grnd_tech(
         TechFlags::ROLL_F => {
             *status_kind = FIGHTER_STATUS_KIND_PASSIVE_FB.as_lua_int();
             *unk = LUA_TRUE;
-            assign(&TECH_ROLL_DIRECTION, Direction::IN);
+            assign(&TECH_ROLL_DIRECTION[eidx()], Direction::IN);
             true
         }
         TechFlags::ROLL_B => {
             *status_kind = FIGHTER_STATUS_KIND_PASSIVE_FB.as_lua_int();
             *unk = LUA_TRUE;
-            assign(&TECH_ROLL_DIRECTION, Direction::OUT);
+            assign(&TECH_ROLL_DIRECTION[eidx()], Direction::OUT);
             true
         }
         _ => false,
@@ -233,6 +253,7 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
 
     let status = StatusModule::status_kind(module_accessor);
     let mut requested_status: i32 = 0;
+    let ei = eidx();
     if [
         *FIGHTER_STATUS_KIND_DOWN_WAIT,
         *FIGHTER_STATUS_KIND_DOWN_WAIT_CONTINUE,
@@ -244,11 +265,11 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
             MissTechFlags::GETUP => *FIGHTER_STATUS_KIND_DOWN_STAND,
             MissTechFlags::ATTACK => *FIGHTER_STATUS_KIND_DOWN_STAND_ATTACK,
             MissTechFlags::ROLL_F => {
-                assign(&MISS_TECH_ROLL_DIRECTION, Direction::IN);
+                assign(&MISS_TECH_ROLL_DIRECTION[ei], Direction::IN);
                 *FIGHTER_STATUS_KIND_DOWN_STAND_FB
             }
             MissTechFlags::ROLL_B => {
-                assign(&MISS_TECH_ROLL_DIRECTION, Direction::OUT);
+                assign(&MISS_TECH_ROLL_DIRECTION[ei], Direction::OUT);
                 *FIGHTER_STATUS_KIND_DOWN_STAND_FB
             }
             _ => return,
@@ -256,18 +277,18 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
     } else if status == *FIGHTER_STATUS_KIND_LAY_DOWN {
         // Snake down throw
         let lockout_time = get_snake_laydown_lockout_time(module_accessor);
-        if frame_counter::should_delay(lockout_time, *FRAME_COUNTER) {
+        if frame_counter::should_delay(lockout_time, FRAME_COUNTERS[ei]) {
             return;
         };
         requested_status = match current_profile().miss_tech_state.get_random() {
             MissTechFlags::GETUP => *FIGHTER_STATUS_KIND_DOWN_STAND,
             MissTechFlags::ATTACK => *FIGHTER_STATUS_KIND_DOWN_STAND_ATTACK,
             MissTechFlags::ROLL_F => {
-                assign(&MISS_TECH_ROLL_DIRECTION, Direction::IN);
+                assign(&MISS_TECH_ROLL_DIRECTION[ei], Direction::IN);
                 *FIGHTER_STATUS_KIND_DOWN_STAND_FB
             }
             MissTechFlags::ROLL_B => {
-                assign(&MISS_TECH_ROLL_DIRECTION, Direction::OUT);
+                assign(&MISS_TECH_ROLL_DIRECTION[ei], Direction::OUT);
                 *FIGHTER_STATUS_KIND_DOWN_STAND_FB
             }
             _ => return,
@@ -283,7 +304,7 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
         };
     } else {
         // Not in a tech situation, make sure the snake dthrow counter is fully reset.
-        frame_counter::full_reset(*FRAME_COUNTER);
+        frame_counter::full_reset(FRAME_COUNTERS[ei]);
     };
 
     if requested_status != 0 {
@@ -313,20 +334,21 @@ pub unsafe fn change_motion(
         return None;
     }
 
+    let ei = eidx();
     if [hash40("passive_stand_f"), hash40("passive_stand_b")].contains(&motion_kind) {
-        if read(&TECH_ROLL_DIRECTION) == Direction::IN {
+        if read(&TECH_ROLL_DIRECTION[ei]) == Direction::IN {
             return Some(hash40("passive_stand_f"));
         } else {
             return Some(hash40("passive_stand_b"));
         }
     } else if [hash40("down_forward_u"), hash40("down_back_u")].contains(&motion_kind) {
-        if read(&MISS_TECH_ROLL_DIRECTION) == Direction::IN {
+        if read(&MISS_TECH_ROLL_DIRECTION[ei]) == Direction::IN {
             return Some(hash40("down_forward_u"));
         } else {
             return Some(hash40("down_back_u"));
         }
     } else if [hash40("down_forward_d"), hash40("down_back_d")].contains(&motion_kind) {
-        if read(&MISS_TECH_ROLL_DIRECTION) == Direction::IN {
+        if read(&MISS_TECH_ROLL_DIRECTION[ei]) == Direction::IN {
             return Some(hash40("down_forward_d"));
         } else {
             return Some(hash40("down_back_d"));
@@ -364,8 +386,18 @@ pub unsafe fn hide_tech() {
     if !is_training_mode() || current_profile().tech_hide == OnOff::OFF {
         return;
     }
-    let module_accessor = try_get_module_accessor(FighterId::CPU)
-        .expect("Could not get CPU module accessor in hide_tech");
+    let ei = eidx();
+    let cpu_id = match ei {
+        0 => FighterId::Player,
+        1 => FighterId::CPU,
+        2 => FighterId::CPU2,
+        3 => FighterId::CPU3,
+        _ => FighterId::CPU,
+    };
+    let module_accessor = match try_get_module_accessor(cpu_id) {
+        Some(acc) => acc,
+        None => return,
+    };
     // Handle invisible tech animations
     let status = StatusModule::status_kind(module_accessor);
     let teching_statuses = [
@@ -382,7 +414,7 @@ pub unsafe fn hide_tech() {
         );
         // Disable visibility
         if MotionModule::frame(module_accessor) >= 6.0 {
-            assign(&NEEDS_VISIBLE, true);
+            NEEDS_VISIBLE[ei].store(true, Ordering::Relaxed);
             VisibilityModule::set_whole(module_accessor, false);
             EffectModule::set_visible_kind(module_accessor, Hash40::new("sys_nopassive"), false);
             EffectModule::set_visible_kind(module_accessor, Hash40::new("sys_down_smoke"), false);
@@ -396,17 +428,15 @@ pub unsafe fn hide_tech() {
         }
         if MotionModule::end_frame(module_accessor) - MotionModule::frame(module_accessor) <= 5.0 {
             // Re-enable visibility
-            assign(&NEEDS_VISIBLE, false);
+            NEEDS_VISIBLE[ei].store(false, Ordering::Relaxed);
             VisibilityModule::set_whole(module_accessor, true);
         }
     } else {
         // If the CPU's tech status was interrupted, make them visible again
-        let mut needs_visible_lock = lock_write(&NEEDS_VISIBLE);
-        if *needs_visible_lock {
-            *needs_visible_lock = false;
+        if NEEDS_VISIBLE[ei].load(Ordering::Relaxed) {
+            NEEDS_VISIBLE[ei].store(false, Ordering::Relaxed);
             VisibilityModule::set_whole(module_accessor, true);
         }
-        drop(needs_visible_lock);
     }
 }
 

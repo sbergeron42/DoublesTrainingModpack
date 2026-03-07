@@ -2,18 +2,27 @@ use crate::training::input_record;
 use smash::app::{self, lua_bind::*};
 use smash::lib::lua_const::*;
 
-use crate::common::*;
-use training_mod_sync::*;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-// the current full hop status
-static FULL_HOP: RwLock<bool> = RwLock::new(false);
+use crate::common::*;
+use crate::common::consts::CURRENT_CPU_ENTRY_ID;
+
+const NUM_ENTRIES: usize = 4;
+fn eidx() -> usize {
+    (CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed) as usize).min(NUM_ENTRIES - 1)
+}
+
+static FULL_HOP: [AtomicBool; NUM_ENTRIES] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
 
 pub fn should_full_hop() -> bool {
-    read(&FULL_HOP)
+    FULL_HOP[eidx()].load(Ordering::Relaxed)
 }
 
 pub fn roll_full_hop() {
-    assign(&FULL_HOP, current_profile().full_hop.get_random().into_bool());
+    FULL_HOP[eidx()].store(current_profile().full_hop.get_random().into_bool(), Ordering::Relaxed);
 }
 
 pub unsafe fn check_button_on(
