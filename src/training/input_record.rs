@@ -521,9 +521,9 @@ unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
         return;
     }
 
-    // For human entries: override AI output with saved FIM-produced input.
+    // For human entries in team mode: override AI output with saved FIM-produced input.
     // inject_human_input uses the per-frame call counter to identify the entry.
-    if doubles::inject_human_input(controller_data) {
+    if doubles::is_team_mode() && doubles::inject_human_input(controller_data) {
         // Human entry — controller input injected. Skip input_record.
         return;
     }

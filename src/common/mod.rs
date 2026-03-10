@@ -37,12 +37,21 @@ fn is_training_mode_ffi() -> bool {
     true
 }
 
-/// Cached result of `is_training_mode()`. Updated once per frame via `refresh_is_training_mode()`.
-/// This eliminates hundreds of FFI calls per frame since every hook checks this.
+/// Cached result of the raw training mode FFI check. Updated once per frame.
 static IS_TRAINING_CACHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Read the cached training mode flag. Zero-cost compared to the FFI call.
+/// Returns true only when in training mode AND the doubles mod is active (team mode ON).
+/// In solo mode this returns false, causing all modpack hooks to pass through to vanilla.
+/// Use `is_training_mode_raw()` when you need the real training mode status regardless
+/// of team mode (e.g. for param reset on mode exit).
 pub fn is_training_mode() -> bool {
+    IS_TRAINING_CACHED.load(core::sync::atomic::Ordering::Relaxed)
+        && crate::training::doubles::is_team_mode()
+}
+
+/// Returns true when in training mode, regardless of team mode.
+/// Used by systems that need to know the real game mode (e.g. shield param reset).
+pub fn is_training_mode_raw() -> bool {
     IS_TRAINING_CACHED.load(core::sync::atomic::Ordering::Relaxed)
 }
 

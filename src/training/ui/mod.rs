@@ -58,8 +58,9 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     let layout_name = skyline::from_c_str((*layout).layout_name);
     let root_pane = &mut *(*layout).root_pane;
 
-    // Set HUD to invisible if HUD is toggled off
-    if is_training_mode()
+    // Set HUD to invisible if HUD is toggled off (team mode only)
+    if crate::training::doubles::is_team_mode()
+        && is_training_mode()
         && is_ready_go()
         && [
             "info_playercursor",
@@ -80,8 +81,19 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
 
     if layout_name == "info_training" {
         frame_counter::tick_real();
-        display::draw(root_pane);
-        menu::draw(root_pane);
+        if crate::training::doubles::is_team_mode() {
+            display::draw(root_pane);
+            menu::draw(root_pane);
+        } else {
+            // Solo mode: actively hide modpack UI panes so they don't show
+            // stale/glitched content from a previous team mode session.
+            if let Some(menu_pane) = root_pane.find_pane_by_name_recursive("TrModMenu") {
+                menu_pane.set_visible(false);
+            }
+            if let Some(display_pane) = root_pane.find_pane_by_name_recursive("TrModDisplay") {
+                display_pane.set_visible(false);
+            }
+        }
 
         // Hide the input log container — the input_log feature was removed
         // but the pane still exists in layout.arc. Must be set every frame

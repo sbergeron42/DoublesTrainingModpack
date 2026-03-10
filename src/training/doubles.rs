@@ -1327,14 +1327,27 @@ unsafe fn poll_css_team_toggle() {
             // Set mode byte and re-invoke the original layout function directly.
             // 0x6 = smash-like (team flags visible), 0xB = training CSS mode.
             let new_mode: u32 = if new_val { 0x6 } else { 0xB };
+            let new_slots: u32 = if new_val { 4 } else { 2 };
+            // Read the OLD visible slot count before changing anything.
+            // css_panel_layout uses the difference between X1 (old count)
+            // and scene+0x160 (new count) to tear down / set up slots.
+            let old_slots = core::ptr::read_volatile(
+                scene_ptr.add(0x160) as *const u32
+            );
+            // Write the NEW visible slot count to scene+0x160 first,
+            // then pass the OLD count as X1 — matching the game's reduce
+            // button behavior (GDB-confirmed).
+            core::ptr::write_volatile(scene_ptr.add(0x160) as *mut u32, new_slots);
+            core::ptr::write_volatile(scene_ptr.add(0x180) as *mut u32, new_slots);
             core::ptr::write_volatile(mode_ptr, new_mode);
             type PanelLayoutFn = unsafe extern "C" fn(*mut u8, u32, u32);
             let orig_fn: PanelLayoutFn = core::mem::transmute(orig_addr);
-            let slots: u32 = if new_val { 4 } else { 4 };
-            orig_fn(scene_ptr, slots, arg2);
+            orig_fn(scene_ptr, old_slots, 1);
+            // Re-cache panel pointers after relayout.
+            cache_panel_ptrs(scene_ptr);
             debug_log(&format!(
-                "CSS team toggle: team_mode={}, mode={:#x}, relayout {} slots",
-                new_val, new_mode, slots
+                "CSS team toggle: team_mode={}, mode={:#x}, old_slots={}, new_slots={}",
+                new_val, new_mode, old_slots, new_slots
             ));
         } else {
             debug_log(&format!("CSS team toggle: team_mode={} (no scene/orig)", new_val));
@@ -1963,12 +1976,11 @@ pub unsafe fn btn_rule_handler_hook(scene_obj: *mut u8) -> u64 {
 pub unsafe fn css_setup_hook(parent: *const u8, mode_params: *mut u8, data_buf: *const u8) {
     if !mode_params.is_null() {
         let mode = core::ptr::read_volatile(mode_params.add(0x0) as *const u32);
-        // DEBUG: always patch training mode CSS to 4 slots (remove condition temporarily)
         if mode == 0xB {
-            // Leave min_slots (+0x8) at 2 so only 2 players are required to proceed.
-            // Only expand max_players so P3/P4 CAN join but aren't mandatory.
-            core::ptr::write_volatile(mode_params.add(0xC) as *mut u32, 4); // max player count
-            // Reset CSS-confirmed fighter kinds for the new CSS session.
+            // Always allocate for 4 players so the toggle can expand mid-CSS.
+            // The visible layout (mode + slot_count) is controlled separately
+            // by css_panel_layout_hook and the toggle handler.
+            core::ptr::write_volatile(mode_params.add(0xC) as *mut u32, 4);
             reset_css_confirmed_kinds();
         }
     }
@@ -2053,16 +2065,21 @@ pub unsafe fn css_panel_layout_hook(scene: *mut u8, slot_count: u32, arg2: u32) 
             || CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed) == scene as usize;
         if is_training {
             CSS_TRAINING_SCENE_PTR.store(scene as usize, Ordering::Relaxed);
-            // Use saved slot count from previous training session if available,
-            // otherwise fall back to visible count (from connected controllers).
-            let saved_slots = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed) as u32;
-            let actual_slots = visible.max(2).max(saved_slots);
-            // Set mode to 0x6 so the panel_set layout code runs.
-            // We intentionally do NOT restore to 0xB — the per-frame CSS update
-            // function also branches on this field, and needs to see 0x6 to keep
-            // panel positions correct.
-            core::ptr::write_volatile(mode_ptr, 0x6);
-            call_original!(scene, actual_slots, arg2);
+
+            if TEAM_MODE.load(Ordering::Relaxed) {
+                // Team mode: expand to 4 slots with smash-like layout (0x6).
+                // Use saved slot count from previous session if available.
+                let saved_slots = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed) as u32;
+                let actual_slots = visible.max(2).max(saved_slots);
+                core::ptr::write_volatile(mode_ptr, 0x6);
+                call_original!(scene, actual_slots, arg2);
+            } else {
+                // Solo mode: vanilla training layout (mode=0xB, 2 slots).
+                // Cap max_players to 2 so the join handler won't allow a
+                // third controller even though 4 panel objects exist.
+                core::ptr::write_volatile(scene.add(0x180) as *mut u32, 2);
+                call_original!(scene, slot_count.min(2), arg2);
+            }
             // Cache panel pointers after layout is done (panels now exist).
             cache_panel_ptrs(scene);
             return;

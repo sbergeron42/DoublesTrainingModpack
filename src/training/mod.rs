@@ -160,15 +160,16 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
         // all subsequent current_profile() calls read from a small per-entry cache.
         refresh_current_profile(entry_id);
 
-        if entry_id == 0 {
-            doubles::sync_team_battle_flag();
+        if doubles::is_team_mode() {
+            if entry_id == 0 {
+                doubles::sync_team_battle_flag();
+            }
+            doubles::set_cpu_hit_team(module_accessor);
         }
 
-        if menu::menu_condition() {
+        if doubles::is_team_mode() && menu::menu_condition() {
             menu::spawn_menu();
         }
-
-        doubles::set_cpu_hit_team(module_accessor);
 
         if is_operation_cpu(module_accessor) {
             WorkModule::set_flag(
@@ -389,7 +390,7 @@ pub unsafe fn handle_set_rumble(
     flag: bool,
     kind: u32,
 ) {
-    if is_training_mode() && is_fighter(module_accessor) {
+    if is_training_mode() && doubles::is_team_mode() && is_fighter(module_accessor) {
         let entry_id =
             WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
         if entry_id > 0 && !doubles::is_human_entry(entry_id) {
@@ -404,7 +405,7 @@ pub unsafe fn handle_set_rumble(
 pub unsafe fn handle_request_rumble_hit(
     module_accessor: &mut BattleObjectModuleAccessor,
 ) {
-    if is_training_mode() && is_fighter(module_accessor) {
+    if is_training_mode() && doubles::is_team_mode() && is_fighter(module_accessor) {
         let entry_id =
             WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
         if entry_id > 0 && !doubles::is_human_entry(entry_id) {
@@ -922,13 +923,15 @@ unsafe fn handle_final_input_mapping(
     if player_idx == 0 {
         doubles::reset_cpu_controls_counter();
 
-        // Save input manager pointer and set up controller slots + mappings
-        // so the FIM dispatch loop fires natively for human entries 2/3.
-        // The dispatch loop processes entries sequentially, so writes here
-        // (during iteration 0) are visible for iterations 2 and 3.
-        let input_mgr = mappings as usize - 0x18;
-        doubles::save_input_mgr_ptr(input_mgr);
-        doubles::setup_native_fim_for_humans(input_mgr, mappings);
+        if doubles::is_team_mode() {
+            // Save input manager pointer and set up controller slots + mappings
+            // so the FIM dispatch loop fires natively for human entries 2/3.
+            // The dispatch loop processes entries sequentially, so writes here
+            // (during iteration 0) are visible for iterations 2 and 3.
+            let input_mgr = mappings as usize - 0x18;
+            doubles::save_input_mgr_ptr(input_mgr);
+            doubles::setup_native_fim_for_humans(input_mgr, mappings);
+        }
     }
 
     // Check if we should apply hot reload configs
