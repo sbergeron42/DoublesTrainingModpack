@@ -1152,6 +1152,20 @@ const OFFSET_CLONE_WRITE: usize = 0x1788260;
 /// Confirmed via GDB hardware watchpoint on panel+0x1F8 during manual CPU→human switch.
 const OFFSET_SET_PANEL_TYPE: usize = 0x1A028B0;
 
+/// Offset of the state_toggle_handler ($main + 0x1A1DBF0).
+/// Signature: fn(scene: *mut u8, vec_entry: *mut u8, new_type: u32)
+/// Properly transitions a panel between states including hash, token, level, etc.
+const OFFSET_STATE_TOGGLE: usize = 0x1A1DBF0;
+
+/// Offset of FUN_71002c5cf0: main game update tick, runs per-frame on MainThread.
+/// Signature: fn(param_1: *mut u8). Hooked to execute deferred state toggles
+/// that require MainThread context (state_toggle crashes from draw hook thread).
+const OFFSET_GAME_TICK: usize = 0x2C5CF0;
+
+/// Deferred P2 state toggle: set by draw hook, consumed by game_tick hook on MainThread.
+/// false = nothing pending, true = call state_toggle(scene, vec_entry_p2, 1).
+static DEFERRED_P2_TOGGLE: AtomicBool = AtomicBool::new(false);
+
 /// Offset of FUN_7101db1910 (btn_rule handler): manages the Solo/Team toggle
 /// button on the CSS. Reads scene_obj+0x44d as a transient "press in progress"
 /// flag; returns 1 when the toggle animation completes.
@@ -1164,6 +1178,9 @@ static TEAM_MODE: AtomicBool = AtomicBool::new(false);
 /// Address of the vanilla team battle flag byte in .bss.
 /// DAT_71052c41e8 — read by app::global_parameter::is_team_battle().
 const TEAM_BATTLE_FLAG_BSS: usize = 0x52c41e8;
+
+/// Diagnostic: periodic state_toggle timer for P2. Non-zero = active, counts frames.
+static P2_TOGGLE_TIMER: AtomicU32 = AtomicU32::new(0);
 
 pub fn is_team_mode() -> bool {
     TEAM_MODE.load(Ordering::Relaxed)
@@ -1205,12 +1222,26 @@ fn ensure_hid_poll_thread() {
         // Buffer must be >= 0x100 (matching HDR's approach).
         let mut buf = [0u8; 0x100];
         loop {
-            skyline::nn::hid::GetNpadFullKeyState(
+            // Poll all NpadIds (0-7) via FullKey, plus handheld via
+            // GetNpadHandheldState (FullKey doesn't return data for 0x20).
+            let mut combined: u64 = 0;
+            for npad_id in 0..8i32 {
+                skyline::nn::hid::GetNpadFullKeyState(
+                    buf.as_mut_ptr() as _,
+                    &npad_id as *const _ as _,
+                );
+                let buttons = core::ptr::read_volatile(buf.as_ptr().add(0x08) as *const u64);
+                combined |= buttons;
+            }
+            // Handheld (attached Joy-Cons): same struct layout, Buttons at +0x08.
+            let handheld_id = 0x20u32;
+            skyline::nn::hid::GetNpadHandheldState(
                 buf.as_mut_ptr() as _,
-                &0i32 as *const _ as _,
+                &handheld_id as *const _ as _,
             );
             let buttons = core::ptr::read_volatile(buf.as_ptr().add(0x08) as *const u64);
-            HID_POLL_CURRENT.store(buttons, Ordering::Relaxed);
+            combined |= buttons;
+            HID_POLL_CURRENT.store(combined, Ordering::Relaxed);
             // ~60fps polling (16ms = 16_000_000 ns)
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
@@ -1287,19 +1318,30 @@ unsafe fn poll_css_team_toggle() {
     // Previous buttons for edge detection (maintained by draw hook, not bg thread).
     static DRAW_PREV: AtomicU64 = AtomicU64::new(0);
 
-    // Try Controller first (lower latency, has hardware just_down).
-    let ctrl_addr = CONTROLLER_PTRS[0].load(Ordering::Relaxed);
-    let (just_x, just_dup, just_drt, just_ddn, just_dlt, held_zr);
+    // Check ALL controllers (any connected controller can toggle).
+    let mut just_x = false;
+    let mut just_dup = false;
+    let mut just_drt = false;
+    let mut just_ddn = false;
+    let mut just_dlt = false;
+    let mut held_zr = false;
+    let mut any_controller = false;
 
-    if ctrl_addr != 0 {
-        let c = &*(ctrl_addr as *const Controller);
-        just_x = c.just_down.x();
-        just_dup = c.just_down.dpad_up();
-        just_drt = c.just_down.dpad_right();
-        just_ddn = c.just_down.dpad_down();
-        just_dlt = c.just_down.dpad_left();
-        held_zr = c.current_buttons.zr();
-    } else {
+    for npad in 0..CONTROLLER_PTRS.len() {
+        let ctrl_addr = CONTROLLER_PTRS[npad].load(Ordering::Relaxed);
+        if ctrl_addr != 0 {
+            any_controller = true;
+            let c = &*(ctrl_addr as *const Controller);
+            just_x |= c.just_down.x();
+            just_dup |= c.just_down.dpad_up();
+            just_drt |= c.just_down.dpad_right();
+            just_ddn |= c.just_down.dpad_down();
+            just_dlt |= c.just_down.dpad_left();
+            held_zr |= c.current_buttons.zr();
+        }
+    }
+
+    if !any_controller {
         // Background thread nn::hid polling — works on cold boot.
         ensure_hid_poll_thread();
         let current = HID_POLL_CURRENT.load(Ordering::Relaxed);
@@ -1337,14 +1379,46 @@ unsafe fn poll_css_team_toggle() {
             // Write the NEW visible slot count to scene+0x160 first,
             // then pass the OLD count as X1 — matching the game's reduce
             // button behavior (GDB-confirmed).
-            core::ptr::write_volatile(scene_ptr.add(0x160) as *mut u32, new_slots);
-            core::ptr::write_volatile(scene_ptr.add(0x180) as *mut u32, new_slots);
-            core::ptr::write_volatile(mode_ptr, new_mode);
             type PanelLayoutFn = unsafe extern "C" fn(*mut u8, u32, u32);
             let orig_fn: PanelLayoutFn = core::mem::transmute(orig_addr);
-            orig_fn(scene_ptr, old_slots, 1);
-            // Re-cache panel pointers after relayout.
-            cache_panel_ptrs(scene_ptr);
+            if new_val {
+                // Expanding to teams: 2→4 slots.
+                core::ptr::write_volatile(scene_ptr.add(0x160) as *mut u32, new_slots);
+                core::ptr::write_volatile(scene_ptr.add(0x180) as *mut u32, new_slots);
+                core::ptr::write_volatile(mode_ptr, new_mode);
+                orig_fn(scene_ptr, old_slots, 1);
+                cache_panel_ptrs(scene_ptr);
+                // Mark P2/P3/P4 eligible for controller takeover
+                // (panel+0x1C0 = 1, GDB-confirmed gate).
+                for i in 1..4 {
+                    let panel = CSS_PANEL_PTRS[i].load(Ordering::Relaxed);
+                    if panel != 0 {
+                        core::ptr::write_volatile((panel as *mut u8).add(0x1C0), 1u8);
+                    }
+                }
+            } else {
+                // Collapsing to solo: reduce to 1 first so css_panel_layout
+                // tears down P2's cursor/token via its built-in cleanup,
+                // then expand back to 2 for a fresh P2 CPU slot.
+                // Step 1: Reduce 4→1 (tears down P2, P3, P4 with cursor cleanup).
+                core::ptr::write_volatile(scene_ptr.add(0x160) as *mut u32, 1);
+                core::ptr::write_volatile(mode_ptr, 0x6u32); // keep smash mode for teardown
+                orig_fn(scene_ptr, old_slots, 1);
+                // Step 2: Expand 1→2 (adds fresh P2 slot).
+                core::ptr::write_volatile(scene_ptr.add(0x160) as *mut u32, 2);
+                core::ptr::write_volatile(scene_ptr.add(0x180) as *mut u32, 2);
+                core::ptr::write_volatile(mode_ptr, new_mode); // now set training mode
+                orig_fn(scene_ptr, 1, 1);
+                cache_panel_ptrs(scene_ptr);
+                // Lock P2 against controller takeover in solo mode.
+                let p2 = CSS_PANEL_PTRS[1].load(Ordering::Relaxed);
+                if p2 != 0 {
+                    core::ptr::write_volatile((p2 as *mut u8).add(0x1C0), 0u8);
+                }
+                // Defer P2 init to MainThread via game_tick hook.
+                // state_toggle must run on MainThread (crashes from TaskWorker).
+                DEFERRED_P2_TOGGLE.store(true, Ordering::Relaxed);
+            }
             debug_log(&format!(
                 "CSS team toggle: team_mode={}, mode={:#x}, old_slots={}, new_slots={}",
                 new_val, new_mode, old_slots, new_slots
@@ -1938,6 +2012,9 @@ pub unsafe fn css_post_draw(layout_name: &str) {
     if layout_name != "chara_select_base" {
         return;
     }
+    if CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed) == 0 {
+        return;
+    }
     if !TEAM_MODE.load(Ordering::Relaxed) || !PANEL_COLORS_SAVED {
         return;
     }
@@ -1952,6 +2029,44 @@ pub unsafe fn css_post_draw(layout_name: &str) {
             }
         }
     }
+}
+
+/// Hook the main game update tick to execute deferred state toggles on MainThread.
+/// state_toggle_handler crashes from TaskWorker (draw hook) because set_panel_type
+/// accesses thread-local state. This hook runs on MainThread every frame.
+#[skyline::hook(offset = OFFSET_GAME_TICK)]
+pub unsafe fn game_tick_hook(param_1: *mut u8) {
+    call_original!(param_1);
+    if !DEFERRED_P2_TOGGLE.load(Ordering::Relaxed) {
+        return;
+    }
+    DEFERRED_P2_TOGGLE.store(false, Ordering::Relaxed);
+    let scene = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
+    if scene == 0 {
+        return;
+    }
+    let scene_ptr = scene as *mut u8;
+    let vec_a_start = core::ptr::read_volatile(
+        scene_ptr.add(0x238) as *const usize,
+    );
+    if vec_a_start == 0 {
+        return;
+    }
+    let vec_entry_p2 = (vec_a_start + 0x10) as *mut u8;
+    let text = skyline::hooks::getRegionAddress(
+        skyline::hooks::Region::Text,
+    ) as usize;
+    type StateToggleFn = unsafe extern "C" fn(*mut u8, *mut u8, u32);
+    let state_toggle: StateToggleFn = core::mem::transmute(
+        text + OFFSET_STATE_TOGGLE,
+    );
+    state_toggle(scene_ptr, vec_entry_p2, 1); // None → CPU
+    // Lock P2 against controller takeover in solo mode.
+    let p2 = CSS_PANEL_PTRS[1].load(Ordering::Relaxed);
+    if p2 != 0 {
+        core::ptr::write_volatile((p2 as *mut u8).add(0x1C0), 0u8);
+    }
+    debug_log("game_tick: deferred P2 state_toggle → CPU (MainThread)");
 }
 
 /// Hook the btn_rule button handler on the CSS. Vanilla manages the Solo/Team
@@ -1974,6 +2089,12 @@ pub unsafe fn btn_rule_handler_hook(scene_obj: *mut u8) -> u64 {
 /// so the CSS allocates UI for 4 players instead of the default 2.
 #[skyline::hook(offset = OFFSET_CSS_SETUP)]
 pub unsafe fn css_setup_hook(parent: *const u8, mode_params: *mut u8, data_buf: *const u8) {
+    // Always clear the training scene pointer at CSS entry. The old scene is
+    // destroyed; without this, the draw thread can race ahead and use stale
+    // pane pointers from FLAG_PANE_CACHE before css_panel_layout_hook sets
+    // the new address. css_panel_layout_hook will re-populate it for training.
+    CSS_TRAINING_SCENE_PTR.store(0, Ordering::Relaxed);
+
     if !mode_params.is_null() {
         let mode = core::ptr::read_volatile(mode_params.add(0x0) as *const u32);
         if mode == 0xB {

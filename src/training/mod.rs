@@ -1080,6 +1080,8 @@ pub fn training_mods() {
         doubles::lua_ai_orchestrator_hook,
         // Doubles: fix cloned character hash for entries 2/3 during CSS→training transition
         doubles::clone_write_hook,
+        // Doubles: MainThread game tick — executes deferred P2 state toggle
+        doubles::game_tick_hook,
         // Doubles: CSS team/solo toggle button handler
         doubles::btn_rule_handler_hook,
         // Doubles: prevent footstools between teammates in team mode
