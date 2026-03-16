@@ -77,7 +77,20 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     }
 
     damage::draw(root_pane, &layout_name);
+    if crate::training::doubles::is_team_mode()
+        && is_training_mode()
+        && is_ready_go()
+    {
+        if layout_name == "info_melee" {
+            crate::training::doubles::melee_portrait_team_colors(root_pane);
+        } else if layout_name == "info_playercursor" {
+            crate::training::doubles::playercursor_team_colors(root_pane);
+        }
+    }
     crate::training::doubles::css_btn_rule_draw(root_pane, &layout_name);
+    crate::training::doubles::css_layout_name_logger(&layout_name);
+    // One-shot: dump the separate `chara_select` layout pane tree.
+    crate::training::doubles::css_dump_chara_select_layout(root_pane, &layout_name);
 
     if layout_name == "info_training" {
         frame_counter::tick_real();

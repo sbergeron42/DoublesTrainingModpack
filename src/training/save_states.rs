@@ -518,11 +518,12 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
         return;
     }
 
+    // Check save combo once — combo_passes is consumptive (resets flag on read).
+    let save_combo_pressed = button_config::combo_passes(button_config::ButtonCombo::SaveState);
+
     // NoAction fast path: skip expensive state machine setup.
     // Only need to check save trigger; all other states need full context below.
-    if save_state.state == NoAction
-        && !button_config::combo_passes(button_config::ButtonCombo::SaveState)
-    {
+    if save_state.state == NoAction && !save_combo_pressed {
         return;
     }
 
@@ -776,7 +777,7 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
     }
 
     // Save state
-    if button_config::combo_passes(button_config::ButtonCombo::SaveState) {
+    if save_combo_pressed {
         // Don't begin saving state if Nana's delayed input is captured
         MIRROR_STATE = 1.0;
         let save_slot = read(&MENU).save_state_slot.into_idx().unwrap_or(0);

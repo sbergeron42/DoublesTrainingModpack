@@ -1085,7 +1085,13 @@ pub fn training_mods() {
         // Doubles: CSS team/solo toggle button handler
         doubles::btn_rule_handler_hook,
         // Doubles: prevent footstools between teammates in team mode
-        doubles::change_status_req_script_hook
+        doubles::change_status_req_script_hook,
+        // Doubles: CSS medal (token) team color override
+        doubles::css_medal_color_hook,
+        // Doubles: CSS hand (cursor) team color override
+        doubles::css_hand_color_hook,
+        // Doubles: prevent P1 from being set to CPU on CSS
+        doubles::set_panel_type_hook
     );
 
     items::init();

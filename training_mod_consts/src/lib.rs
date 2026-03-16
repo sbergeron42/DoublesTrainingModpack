@@ -98,6 +98,7 @@ pub struct TrainingModpackMenu {
     pub update_policy: UpdatePolicy,
     pub lra_reset: OnOff,
     pub teammate_slot: TeammateSlot,
+    pub team_outlines: OnOff,
     #[serde(default)]
     pub cpu_profile_assign: [u8; MAX_CPU_SLOTS],
 }
@@ -223,6 +224,7 @@ pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {
     update_policy: UpdatePolicy::default(),
     lra_reset: OnOff::ON,
     teammate_slot: TeammateSlot::NONE,
+    team_outlines: OnOff::ON,
     cpu_profile_assign: [0; MAX_CPU_SLOTS],
 };
 
@@ -1030,6 +1032,13 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         "Teammate Slot",
         "teammate_slot",
         "Which CPU slot is controlled by Player 2 in doubles mode.\nWhen set, the modpack automatically enables CPU Behavior = Control for that slot and keeps modpack AI active on all other CPU slots.",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(OnOff::to_submenu(
+        "Team Outlines",
+        "team_outlines",
+        "Show team-colored outlines on fighters in team mode.\nOutline colors match each fighter's assigned team color.",
         ToggleSingle,
         false,
     ));
