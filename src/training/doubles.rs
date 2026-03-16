@@ -2765,7 +2765,7 @@ pub unsafe fn set_panel_type_hook(panel: *mut u8, panel_type: i32) {
 }
 
 /// Hook the CSS setup function to expand training mode from 2 to 4 player slots.
-/// When doubles is enabled (teammate_slot != None), patches the mode_params struct
+/// When on the training CSS, patches the mode_params struct
 /// so the CSS allocates UI for 4 players instead of the default 2.
 #[skyline::hook(offset = OFFSET_CSS_SETUP)]
 pub unsafe fn css_setup_hook(parent: *const u8, mode_params: *mut u8, data_buf: *const u8) {
@@ -3156,6 +3156,13 @@ pub unsafe fn lua_ai_orchestrator_hook(ai_mgr: *mut u8) {
 /// Panel access: scene+0x250 is a std::vector of (vtable, panel_ptr) pairs (0x10 each).
 #[skyline::hook(offset = OFFSET_CLONE_WRITE)]
 pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8, bss_out: *mut u8) {
+    // Only apply training-specific overrides when transitioning from the
+    // training CSS. In other modes (Smash, etc.) just call through.
+    if CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed) == 0 {
+        call_original!(config, entry_index, byte_flag, bss_out);
+        return;
+    }
+
     // On the first clone_write call (entry 0), snapshot all panel state so we
     // can restore it when the user returns to CSS from training mode.
     if entry_index == 0 {
