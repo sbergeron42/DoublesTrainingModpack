@@ -1069,6 +1069,8 @@ pub fn training_mods() {
         doubles::css_setup_hook,
         // Doubles: CSS panel layout fix (position P3/P4 panels)
         doubles::css_panel_layout_hook,
+        // Doubles: CSS restoration loop — write controller slot for human entries
+        doubles::css_restore_loop_hook,
         // Doubles: capture fighter_kind from CSS confirm for P3/P4
         doubles::css_confirm_hook,
         // Doubles: override cloned fighter_kind for entries 2/3 with CSS picks

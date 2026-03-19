@@ -1147,6 +1147,20 @@ const OFFSET_CSS_SETUP: usize = 0x1A20200;
 /// 1301: FUN_7101a25700, 1304: +0xB00 delta.
 const OFFSET_CSS_PANEL_LAYOUT: usize = 0x1A26200;
 
+/// Offset of the `ldr w19, [x20]` instruction inside the CSS restoration loop.
+/// This instruction loads the controller slot from the second BSS array entry.
+/// If the value is -1 (0xFFFFFFFF), the loop takes an alternate path that
+/// restores the panel as CPU instead of human.
+///
+/// Our inline hook writes the saved controller slot to [X20] just before
+/// this load executes, so human entries get restored correctly.
+///
+/// Registers at this point:
+///   X20 = second BSS array entry pointer (stride 0x240)
+///   X21 = loop index (0-based, = entry_index)
+///   X25 = scene object
+const OFFSET_CSS_RESTORE_LOOP: usize = 0x1843144;
+
 /// Offset of FUN_7100678150 from the .text base ($main).
 /// Confirmed: 13.0.4 real Switch hardware.
 const OFFSET_CREATE_FIGHTER_ENTRY: usize = 0x678150;
@@ -1194,6 +1208,14 @@ const OFFSET_CLONE_WRITE: usize = 0x1788260;
 /// and for type=0 (human) handles tag/profile setup via virtual call through panel+0x1B0.
 /// Confirmed via GDB hardware watchpoint on panel+0x1F8 during manual CPU→human switch.
 const OFFSET_SET_PANEL_TYPE: usize = 0x1A028B0;
+
+/// Offset of make_panel_human ($main + 0x1A1CF90).
+/// Signature: fn(scene, panel_vec_entry, vectorA_entry, arg3: u32, arg4: u32)
+///   arg3 = 1 during natural join (Start press), arg4 = 0.
+/// Full human join flow: calls set_panel_type(panel, 0) internally, plus creates
+/// cursor (hand), token (medal), controller binding, and tag/profile setup.
+/// GDB-confirmed: this is the function called when pressing Start to join a CPU slot.
+const OFFSET_MAKE_PANEL_HUMAN: usize = 0x1A1CF90;
 
 /// Offset of the state_toggle_handler ($main + 0x1A1DBF0).
 /// Signature: fn(scene: *mut u8, vec_entry: *mut u8, new_type: u32)
@@ -2823,6 +2845,12 @@ static SAVED_CSS_IS_CPU: [AtomicI32; 4] = [
 static SAVED_CSS_TAG: [AtomicI32; 4] = [
     AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0),
 ];
+static SAVED_CSS_COSTUME: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+static SAVED_CSS_NPAD: [AtomicI32; 4] = [
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+];
 
 /// Snapshot panel pointers from the scene's panel vector at scene+0x250.
 unsafe fn cache_panel_ptrs(scene: *const u8) {
@@ -2883,10 +2911,56 @@ pub unsafe fn css_panel_layout_hook(scene: *mut u8, slot_count: u32, arg2: u32) 
             }
             // Cache panel pointers after layout is done (panels now exist).
             cache_panel_ptrs(scene);
+            // Write saved state to main BSS data array so the game's own
+            // restoration loop picks up correct types and hashes.
+            // The main BSS survives the training→CSS transition (GDB-confirmed).
+            // DISABLED: crashes during transition — needs investigation.
+            // if SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed) > 0 {
+            //     write_saved_state_to_bss();
+            // }
             return;
         }
     }
     call_original!(scene, slot_count, arg2)
+}
+
+/// Inline hook on the CSS restoration loop's `ldr w19, [x20]` instruction.
+/// The game's CSS init resets the second BSS array to -1 for all entries,
+/// which causes the restoration loop to skip human panel restoration.
+/// This hook writes our saved controller slot (NpadId) to [X20] just before
+/// the load executes, so the loop takes the human restoration path.
+///
+/// Registers: X21 = entry index (0-based), X20 = second BSS array entry ptr.
+#[skyline::hook(offset = OFFSET_CSS_RESTORE_LOOP, inline)]
+pub unsafe fn css_restore_loop_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    let entry_idx = ctx.registers[21].x() as usize;
+    let second_bss_ptr = ctx.registers[20].x() as *mut i32;
+
+    if second_bss_ptr.is_null() || entry_idx >= 4 {
+        return;
+    }
+
+    let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
+    if saved_count == 0 || entry_idx >= saved_count {
+        return;
+    }
+
+    let saved_is_cpu = SAVED_CSS_IS_CPU[entry_idx].load(Ordering::Relaxed);
+    if saved_is_cpu == 0 {
+        // Human entry: write saved NpadId to second BSS [X20+0x00].
+        // This prevents the -1 check from sending us down the CPU path.
+        // NpadId was captured from panel+0x390 in save_css_state_for_reentry.
+        let saved_npad = SAVED_CSS_NPAD[entry_idx].load(Ordering::Relaxed);
+        if saved_npad >= 0 {
+            core::ptr::write_volatile(second_bss_ptr, saved_npad);
+        }
+        // Also fix main BSS type: training mode writes CPU (1) for entry 1,
+        // but we need human (0). X28 = main BSS entry base, type at +0x30.
+        let main_bss_ptr = ctx.registers[28].x() as *mut i32;
+        if !main_bss_ptr.is_null() {
+            core::ptr::write_volatile(main_bss_ptr.add(0x30 / 4), 0); // type = human
+        }
+    }
 }
 
 /// Hook for css_confirm_per_player: captures the fighter_kind each slot confirms at CSS.
@@ -3504,9 +3578,186 @@ unsafe fn save_css_state_for_reentry() {
             core::ptr::read_volatile(panel.add(0x394) as *const i32),
             Ordering::Relaxed,
         );
+        SAVED_CSS_COSTUME[i].store(
+            core::ptr::read_volatile(panel.add(0x210) as *const u8) as u32,
+            Ordering::Relaxed,
+        );
+        // Save NpadId (controller slot) from panel+0x390.
+        // This is the authoritative source — panel+0x1FC and HUMAN_ENTRY_NPAD
+        // both return 0 for all entries regardless of actual controller.
+        SAVED_CSS_NPAD[i].store(
+            core::ptr::read_volatile(panel.add(0x390) as *const i32),
+            Ordering::Relaxed,
+        );
     }
     SAVED_CSS_SLOT_COUNT.store(count, Ordering::Relaxed);
     debug_log(&format!("save_css_state: {} slots saved", count));
 }
 
+/// BSS offsets for the CSS data arrays.
+/// Main array: $main + 0x5307770, stride 0x1C8 per entry.
+/// Second array (controller/tag): $main + 0x53085B0, stride 0x240 per entry.
+const BSS_CSS_DATA_ARRAY: usize = 0x5307770;
+const BSS_CSS_DATA_STRIDE: usize = 0x1C8;
+const BSS_CSS_SECOND_ARRAY: usize = 0x53085B0;
+const BSS_CSS_SECOND_STRIDE: usize = 0x240;
+
+/// Write saved CSS state to the BSS data arrays so the game's restoration
+/// loop picks up correct types, hashes, and controller info.
+/// Called from css_panel_layout_hook AFTER call_original!, before the
+/// restoration loop runs.
+unsafe fn write_saved_state_to_bss() {
+    use skyline::hooks::{getRegionAddress, Region};
+    let text_base = getRegionAddress(Region::Text) as usize;
+    if text_base == 0 {
+        return;
+    }
+
+    let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
+
+    for i in 1..saved_count.min(4) {
+        let saved_is_cpu = SAVED_CSS_IS_CPU[i].load(Ordering::Relaxed);
+        let saved_hash = SAVED_CSS_HASH[i].load(Ordering::Relaxed);
+
+        // Compute BSS entry address using raw arithmetic to avoid ptr overflow.
+        let bss_addr = text_base + BSS_CSS_DATA_ARRAY + i * BSS_CSS_DATA_STRIDE;
+        let target_type: i32 = if saved_is_cpu == 0 { 0 } else { 1 };
+
+        // Write type at +0x30.
+        core::ptr::write_volatile((bss_addr + 0x30) as *mut i32, target_type);
+
+        // Write hash at +0x38 and duplicate at +0x40.
+        let null_hash: u64 = 0xc1ffff0000000000;
+        let random_hash: u64 = 0xc100000fd5f7fa78;
+        if saved_hash != 0 && saved_hash != null_hash && saved_hash != random_hash {
+            core::ptr::write_volatile((bss_addr + 0x38) as *mut u64, saved_hash);
+            core::ptr::write_volatile((bss_addr + 0x40) as *mut u64, saved_hash);
+        }
+
+        debug_log(&format!(
+            "write_bss: entry={} type={} hash={:#018x}",
+            i, target_type, saved_hash
+        ));
+    }
+}
+
+/// One-shot restore of CSS panel states from saved data (LEGACY).
+/// Kept for reference — the BSS-write approach in write_saved_state_to_bss
+/// is preferred as it lets the game's own restoration loop handle everything.
+///
+/// For each entry with saved state:
+///   - P1: always human, character preserved by vanilla — skip.
+///   - P2: if saved as human, call set_panel_type(panel, 0).
+///   - P3/P4: write character hash + costume to panel, then call
+///     set_panel_type for the saved type (human=0 or CPU=1).
+///
+/// set_panel_type handles all internal bookkeeping: sub-objects, visual
+/// refresh, tag/profile setup (human path), cursor creation, etc.
+unsafe fn restore_css_panels_on_reentry() {
+    use skyline::hooks::{getRegionAddress, Region};
+    let text_base = getRegionAddress(Region::Text) as usize;
+
+    let scene_addr = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
+    if scene_addr == 0 {
+        return;
+    }
+    let scene = scene_addr as *mut u8;
+
+    // Re-cache panel pointers from the (new) scene — panels are recreated
+    // at new addresses on each CSS entry.
+    cache_panel_ptrs(scene);
+
+    let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
+
+    // Read vector base pointers for make_panel_human args.
+    let panel_vec_base = core::ptr::read_volatile(scene.add(0x250) as *const usize);
+    let vec_a_base = core::ptr::read_volatile(scene.add(0x238) as *const usize);
+    if panel_vec_base == 0 || vec_a_base == 0 {
+        debug_log("css_restore: vector bases are null, aborting");
+        return;
+    }
+
+    let make_panel_human: extern "C" fn(*mut u8, *mut u8, *mut u8, u32, u32) =
+        core::mem::transmute(text_base + OFFSET_MAKE_PANEL_HUMAN);
+    let set_panel_type: extern "C" fn(*mut u8, i32) =
+        core::mem::transmute(text_base + OFFSET_SET_PANEL_TYPE);
+
+    for i in 0..saved_count.min(4) {
+        let panel = CSS_PANEL_PTRS[i].load(Ordering::Relaxed) as *mut u8;
+        if panel.is_null() {
+            continue;
+        }
+
+        let saved_is_cpu = SAVED_CSS_IS_CPU[i].load(Ordering::Relaxed);
+        let saved_hash = SAVED_CSS_HASH[i].load(Ordering::Relaxed);
+        let saved_costume = SAVED_CSS_COSTUME[i].load(Ordering::Relaxed) as u8;
+        let current_type = core::ptr::read_volatile(panel.add(0x1F8) as *const i32);
+
+        // P1 (entry 0): vanilla handles it correctly — always human, char preserved.
+        if i == 0 {
+            continue;
+        }
+
+        // Compute vector entry pointers for this index.
+        let panel_vec_entry = (panel_vec_base + i * 0x10) as *mut u8;
+        let vec_a_entry = (vec_a_base + i * 0x10) as *mut u8;
+
+        // Ensure takeover-eligible byte is set for non-P1 panels so
+        // controller join/state cycling works in team mode.
+        core::ptr::write_volatile(panel.add(0x1C0) as *mut u8, 1);
+
+        if saved_is_cpu == 0 {
+            // Human entry: use make_panel_human for full join flow
+            // (cursor, token, controller binding, set_panel_type internally).
+            if current_type != 0 {
+                // Write tag before — the human init path reads panel+0x394.
+                let saved_tag = SAVED_CSS_TAG[i].load(Ordering::Relaxed);
+                if saved_tag >= 0 {
+                    core::ptr::write_volatile(panel.add(0x394) as *mut i32, saved_tag);
+                }
+                // Save current hash/costume — make_panel_human clears them
+                // as part of its cursor cleanup sequence.
+                let current_hash = core::ptr::read_volatile(panel.add(0x200) as *const u64);
+                let current_costume = core::ptr::read_volatile(panel.add(0x210) as *const u8);
+                debug_log(&format!(
+                    "css_restore: entry={} → HUMAN via make_panel_human (was type={})",
+                    i, current_type
+                ));
+                make_panel_human(scene, panel_vec_entry, vec_a_entry, 1, 0);
+                // Restore character hash + costume after make_panel_human wiped them.
+                let null_hash: u64 = 0xc1ffff0000000000;
+                let restore_hash = if saved_hash != 0 && saved_hash != null_hash {
+                    saved_hash
+                } else {
+                    current_hash
+                };
+                if restore_hash != 0 && restore_hash != null_hash {
+                    core::ptr::write_volatile(panel.add(0x200) as *mut u64, restore_hash);
+                    let restore_costume = if saved_hash != 0 && saved_hash != null_hash {
+                        saved_costume
+                    } else {
+                        current_costume
+                    };
+                    core::ptr::write_volatile(panel.add(0x210) as *mut u8, restore_costume);
+                }
+            }
+        } else {
+            // CPU entry: write character hash + costume, then activate as CPU.
+            let null_hash: u64 = 0xc100000fd5f7fa78;
+            if saved_hash != 0 && saved_hash != null_hash {
+                core::ptr::write_volatile(panel.add(0x200) as *mut u64, saved_hash);
+                core::ptr::write_volatile(panel.add(0x210) as *mut u8, saved_costume);
+            }
+            if current_type != 1 {
+                debug_log(&format!(
+                    "css_restore: entry={} hash={:#018x} costume={} → CPU",
+                    i, saved_hash, saved_costume
+                ));
+                set_panel_type(panel, 1);
+            }
+        }
+    }
+
+    debug_log(&format!("css_restore: done ({} entries processed)", saved_count.min(4)));
+}
 
