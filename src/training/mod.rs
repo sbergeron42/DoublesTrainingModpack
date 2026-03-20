@@ -520,6 +520,10 @@ unsafe fn lra_handle(ctx: &mut InlineCtx) {
 unsafe fn stale_handle(ctx: &mut InlineCtx) {
     TRAINING_MENU_ADDR = ctx.registers[22].x() as *mut PauseMenu;
     (*TRAINING_MENU_ADDR).stale_move_toggle = 1;
+    // Default "No. of CPUs" to 3 (=4 fighters) only in team mode; solo keeps vanilla default (1 CPU).
+    if crate::training::doubles::is_team_mode() {
+        *((TRAINING_MENU_ADDR as *mut u8).add(0xb40) as *mut u32) = 3;
+    }
 }
 
 // Set Stale Moves to On in the menu text
@@ -1071,6 +1075,8 @@ pub fn training_mods() {
         doubles::css_panel_layout_hook,
         // Doubles: CSS restoration loop — write controller slot for human entries
         doubles::css_restore_loop_hook,
+        // Doubles: CSS restoration loop back-edge — override bound from 2 to 4
+        doubles::css_restore_loop_bound_hook,
         // Doubles: capture fighter_kind from CSS confirm for P3/P4
         doubles::css_confirm_hook,
         // Doubles: override cloned fighter_kind for entries 2/3 with CSS picks

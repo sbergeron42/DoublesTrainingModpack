@@ -85,12 +85,18 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
             crate::training::doubles::melee_portrait_team_colors(root_pane);
         } else if layout_name == "info_playercursor" {
             crate::training::doubles::playercursor_team_colors(root_pane);
+        } else if layout_name == "info_loupe" {
+            crate::training::doubles::loupe_team_colors(root_pane);
+        } else if layout_name == "info_radar_a" {
+            crate::training::doubles::radar_marker_team_colors(root_pane);
         }
     }
     crate::training::doubles::css_btn_rule_draw(root_pane, &layout_name);
     crate::training::doubles::css_layout_name_logger(&layout_name);
     // One-shot: dump the separate `chara_select` layout pane tree.
     crate::training::doubles::css_dump_chara_select_layout(root_pane, &layout_name);
+    // One-shot: dump loupe/radar pane trees for off-screen indicator team color research.
+    crate::training::doubles::loupe_radar_diagnostic_dump(root_pane, &layout_name);
 
     if layout_name == "info_training" {
         frame_counter::tick_real();

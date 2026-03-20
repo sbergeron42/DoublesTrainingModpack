@@ -1161,6 +1161,16 @@ const OFFSET_CSS_PANEL_LAYOUT: usize = 0x1A26200;
 ///   X25 = scene object
 const OFFSET_CSS_RESTORE_LOOP: usize = 0x1843144;
 
+/// Offset of the `cmp x21, x23` instruction at the restoration loop's back-edge.
+/// The loop increments X21, then compares to X23 and branches back if not equal.
+/// X23 holds the loop bound (normally 2 for training mode). We hook this to
+/// override X23 so the loop processes all 4 entries.
+///
+/// GDB-confirmed register state at this point:
+///   X21 = loop counter (already incremented)
+///   X23 = loop bound (restored to 2 from stack, clobbering any earlier override)
+const OFFSET_CSS_RESTORE_LOOP_BOUND: usize = 0x1843A00;
+
 /// Offset of FUN_7100678150 from the .text base ($main).
 /// Confirmed: 13.0.4 real Switch hardware.
 const OFFSET_CREATE_FIGHTER_ENTRY: usize = 0x678150;
@@ -2314,6 +2324,143 @@ pub unsafe fn css_dump_chara_select_layout(root_pane: &Pane, layout_name: &str) 
     debug_log("=== END CHARA_SELECT LAYOUT ===");
 }
 
+// ---------------------------------------------------------------------------
+// Loupe / Radar diagnostic dump — one-shot pane tree + anim probe
+// ---------------------------------------------------------------------------
+pub unsafe fn loupe_radar_diagnostic_dump(root_pane: &Pane, layout_name: &str) {
+    match layout_name {
+        "info_loupe" => {
+            static DUMPED_LOUPE: AtomicBool = AtomicBool::new(false);
+            if DUMPED_LOUPE.swap(true, Ordering::SeqCst) { return; }
+            debug_log("=== INFO_LOUPE PANE TREE (depth 5) ===");
+            dump_pane_tree(root_pane as *const Pane, 0, 5);
+            debug_log("=== END INFO_LOUPE ===");
+
+            // Probe per-player loupe Parts panes for AnimTransform data.
+            for i in 1..=4 {
+                let name = format!("set_parts_loupe_p{}", i);
+                let pane = find_pane_by_name(root_pane as *const Pane, &name);
+                probe_parts_anim(pane, &name);
+            }
+            // Probe arrow panes for color animations.
+            for i in 0..4 {
+                let name_l = format!("set_parts_arrow_l_{:02}", i);
+                let name_r = format!("set_parts_arrow_r_{:02}", i);
+                let pane_l = find_pane_by_name(root_pane as *const Pane, &name_l);
+                let pane_r = find_pane_by_name(root_pane as *const Pane, &name_r);
+                probe_parts_anim(pane_l, &name_l);
+                probe_parts_anim(pane_r, &name_r);
+            }
+            debug_log("=== END LOUPE ANIM PROBE ===");
+        }
+        "info_radar_a" => {
+            static DUMPED_RADAR_A: AtomicBool = AtomicBool::new(false);
+            if DUMPED_RADAR_A.swap(true, Ordering::SeqCst) { return; }
+            debug_log("=== INFO_RADAR_A PANE TREE (depth 5) ===");
+            dump_pane_tree(root_pane as *const Pane, 0, 5);
+            debug_log("=== END INFO_RADAR_A ===");
+            // Probe radar marker panes.
+            for i in 1..=4 {
+                let name = format!("set_parts_marker_{:02}", i);
+                let pane = find_pane_by_name(root_pane as *const Pane, &name);
+                probe_parts_anim(pane, &name);
+            }
+            debug_log("=== END RADAR_A MARKER PROBE ===");
+        }
+        "info_radar_b" => {
+            static DUMPED_RADAR_B: AtomicBool = AtomicBool::new(false);
+            if DUMPED_RADAR_B.swap(true, Ordering::SeqCst) { return; }
+            debug_log("=== INFO_RADAR_B PANE TREE (depth 5) ===");
+            dump_pane_tree(root_pane as *const Pane, 0, 5);
+            debug_log("=== END INFO_RADAR_B ===");
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loupe (off-screen indicator) team colors
+// ---------------------------------------------------------------------------
+
+/// Set loupe bubble and arrow colors to match team colors.
+/// Called from handle_draw when layout is `info_loupe` and team mode is active.
+///
+/// The `set_parts_loupe_p%d` Parts panes (sub-layout `info_loupe_lct_00`) each
+/// have an anim_trans_list where anim[0] (`p_col`) controls the bubble color.
+/// Frame mapping: 10=Red, 11=Blue, 12=Yellow(?), 13=Green(?) — base 10.
+///
+/// The `set_parts_arrow_{l,r}_%02d` Parts panes (sub-layout `info_melee_lct_arrow`)
+/// have anim[0]=arrow_anim, anim[1]=arrow_color. Same base 10 mapping.
+/// Known issue: Green team (frame 12) shows as dark blue for trio arrows.
+pub unsafe fn loupe_team_colors(root_pane: &Pane) {
+    // Loupe bubbles: set_parts_loupe_p1 through p4 (1-indexed).
+    for i in 0..4usize {
+        let color = TEAM_COLORS[i].load(Ordering::Relaxed);
+        let target_frame = 10.0 + color as f32;
+
+        let name = format!("set_parts_loupe_p{}", i + 1);
+        if let Some(pane) = root_pane.find_pane_by_name_recursive(&name) {
+            let layout_ptr = *((pane as *const Pane as usize + 0xE8) as *const *mut Layout);
+            if layout_ptr.is_null() { continue; }
+            let layout = &mut *layout_ptr;
+            let anim_root = &mut layout.anim_trans_list as *mut AnimTransformNode;
+            let first_node = (*anim_root).next;
+            if first_node.is_null() || std::ptr::eq(first_node, anim_root) { continue; }
+            let anim_transform = (first_node as *mut u64).add(2) as *mut AnimTransform;
+            (*anim_transform).frame = target_frame;
+        }
+    }
+
+    // Directional trio arrows: set_parts_arrow_{l,r}_%02d (0-indexed).
+    // Arrow anim_trans_list: anim[0]=arrow_anim, anim[1]=arrow_color.
+    for i in 0..4usize {
+        let color = TEAM_COLORS[i].load(Ordering::Relaxed);
+        let target_frame = 10.0 + color as f32;
+
+        for prefix in &["set_parts_arrow_l_", "set_parts_arrow_r_"] {
+            let name = format!("{}{:02}", prefix, i);
+            if let Some(pane) = root_pane.find_pane_by_name_recursive(&name) {
+                let layout_ptr = *((pane as *const Pane as usize + 0xE8) as *const *mut Layout);
+                if layout_ptr.is_null() { continue; }
+                let layout = &mut *layout_ptr;
+                let anim_root = &mut layout.anim_trans_list as *mut AnimTransformNode;
+                let first_node = (*anim_root).next;
+                if first_node.is_null() || std::ptr::eq(first_node, anim_root) { continue; }
+                // Skip first (arrow_anim), get second (arrow_color).
+                let second_node = (*first_node).next;
+                if second_node.is_null() || std::ptr::eq(second_node, anim_root) { continue; }
+                let anim_transform = (second_node as *mut u64).add(2) as *mut AnimTransform;
+                (*anim_transform).frame = target_frame;
+            }
+        }
+    }
+}
+
+/// Set minimap radar marker colors to match team colors.
+/// Called from handle_draw when layout is `info_radar_a` and team mode is active.
+///
+/// `set_parts_marker_01`–`08` (1-indexed) each have anim[0] controlling color.
+/// Vanilla: P1=frame 9, P2+=frame 10 (cloned default). Base appears to be 9.
+pub unsafe fn radar_marker_team_colors(root_pane: &Pane) {
+    for i in 0..4usize {
+        let color = TEAM_COLORS[i].load(Ordering::Relaxed);
+        // Radar markers use base 9 (from probe: P1=9=red, P2=10=blue).
+        let target_frame = 9.0 + color as f32;
+
+        let name = format!("set_parts_marker_{:02}", i + 1);
+        if let Some(pane) = root_pane.find_pane_by_name_recursive(&name) {
+            let layout_ptr = *((pane as *const Pane as usize + 0xE8) as *const *mut Layout);
+            if layout_ptr.is_null() { continue; }
+            let layout = &mut *layout_ptr;
+            let anim_root = &mut layout.anim_trans_list as *mut AnimTransformNode;
+            let first_node = (*anim_root).next;
+            if first_node.is_null() || std::ptr::eq(first_node, anim_root) { continue; }
+            let anim_transform = (first_node as *mut u64).add(2) as *mut AnimTransform;
+            (*anim_transform).frame = target_frame;
+        }
+    }
+}
+
 /// Called from handle_draw for every layout each frame.
 /// During training CSS on `chara_select_base`, shows/hides team flag panes
 /// based on the current TEAM_MODE state, scales flags, updates "Training"
@@ -2851,6 +2998,9 @@ static SAVED_CSS_COSTUME: [AtomicU32; 4] = [
 static SAVED_CSS_NPAD: [AtomicI32; 4] = [
     AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
 ];
+static SAVED_CSS_TEAM_COLOR: [AtomicI32; 4] = [
+    AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
+];
 
 /// Snapshot panel pointers from the scene's panel vector at scene+0x250.
 unsafe fn cache_panel_ptrs(scene: *const u8) {
@@ -2911,13 +3061,6 @@ pub unsafe fn css_panel_layout_hook(scene: *mut u8, slot_count: u32, arg2: u32) 
             }
             // Cache panel pointers after layout is done (panels now exist).
             cache_panel_ptrs(scene);
-            // Write saved state to main BSS data array so the game's own
-            // restoration loop picks up correct types and hashes.
-            // The main BSS survives the training→CSS transition (GDB-confirmed).
-            // DISABLED: crashes during transition — needs investigation.
-            // if SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed) > 0 {
-            //     write_saved_state_to_bss();
-            // }
             return;
         }
     }
@@ -2930,36 +3073,120 @@ pub unsafe fn css_panel_layout_hook(scene: *mut u8, slot_count: u32, arg2: u32) 
 /// This hook writes our saved controller slot (NpadId) to [X20] just before
 /// the load executes, so the loop takes the human restoration path.
 ///
-/// Registers: X21 = entry index (0-based), X20 = second BSS array entry ptr.
+/// Extended for P3/P4 support:
+///   - Caches BSS base addresses at iteration 0 (for write_saved_state_to_bss)
+///   - Pre-writes second BSS NpadId for entries 2/3 at iteration 0 (in case
+///     the loop reaches them after main BSS pre-population fixed the bound)
+///   - Writes main BSS type/hash/team for ALL entry types (human + CPU)
+///
+/// Registers: X21 = entry index (0-based), X20 = second BSS array entry ptr,
+///            X28 = main BSS entry ptr (current entry).
 #[skyline::hook(offset = OFFSET_CSS_RESTORE_LOOP, inline)]
 pub unsafe fn css_restore_loop_hook(ctx: &mut skyline::hooks::InlineCtx) {
     let entry_idx = ctx.registers[21].x() as usize;
     let second_bss_ptr = ctx.registers[20].x() as *mut i32;
+    let main_bss_ptr = ctx.registers[28].x() as usize;
 
     if second_bss_ptr.is_null() || entry_idx >= 4 {
         return;
     }
 
     let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
+
+    // --- Iteration 0: cache BSS base addresses + pre-write entries 2/3 ---
+    if entry_idx == 0 {
+        // Pre-write second BSS NpadId for entries 2/3. The -1 reset at
+        // $main+0x23EBB68 has already fired by this point, so our writes
+        // persist. The back-edge hook extends the loop to process entries
+        // 2/3, which will find correct NpadId values here.
+        for i in 2..saved_count.min(4) {
+            let target_ptr = (second_bss_ptr as usize + i * BSS_CSS_SECOND_STRIDE) as *mut i32;
+            let saved_is_cpu = SAVED_CSS_IS_CPU[i].load(Ordering::Relaxed);
+            if saved_is_cpu == 0 {
+                // Human: write saved NpadId so the loop takes the human path.
+                let saved_npad = SAVED_CSS_NPAD[i].load(Ordering::Relaxed);
+                if saved_npad >= 0 {
+                    core::ptr::write_volatile(target_ptr, saved_npad);
+                    debug_log(&format!(
+                        "restore_loop[0]: pre-wrote second_bss[{}] npad={}",
+                        i, saved_npad
+                    ));
+                }
+            }
+            // CPU entries: -1 is correct (already reset), no write needed.
+        }
+
+        debug_log(&format!(
+            "restore_loop[0]: cached main_bss={:#x} second_bss={:#x} saved_count={}",
+            main_bss_ptr, second_bss_ptr as usize, saved_count
+        ));
+    }
+
     if saved_count == 0 || entry_idx >= saved_count {
         return;
     }
 
+    // --- Per-iteration: write BSS data for the current entry ---
     let saved_is_cpu = SAVED_CSS_IS_CPU[entry_idx].load(Ordering::Relaxed);
+
+    // Second BSS: write NpadId for human entries.
     if saved_is_cpu == 0 {
-        // Human entry: write saved NpadId to second BSS [X20+0x00].
-        // This prevents the -1 check from sending us down the CPU path.
-        // NpadId was captured from panel+0x390 in save_css_state_for_reentry.
         let saved_npad = SAVED_CSS_NPAD[entry_idx].load(Ordering::Relaxed);
         if saved_npad >= 0 {
             core::ptr::write_volatile(second_bss_ptr, saved_npad);
         }
-        // Also fix main BSS type: training mode writes CPU (1) for entry 1,
-        // but we need human (0). X28 = main BSS entry base, type at +0x30.
-        let main_bss_ptr = ctx.registers[28].x() as *mut i32;
-        if !main_bss_ptr.is_null() {
-            core::ptr::write_volatile(main_bss_ptr.add(0x30 / 4), 0); // type = human
+    }
+
+    // Main BSS: write type, hash, and team color for ALL entry types.
+    // This ensures entries 2/3 have correct data even if write_saved_state_to_bss
+    // couldn't run (first visit, cached address was 0).
+    if main_bss_ptr != 0 {
+        let main_bss = main_bss_ptr as *mut u8;
+        // Type: 0=human, 1=CPU (overwrite disabled=3 or training's CPU=1 for P2).
+        let target_type: i32 = if saved_is_cpu == 0 { 0 } else { 1 };
+        core::ptr::write_volatile(main_bss.add(0x30) as *mut i32, target_type);
+
+        // Hash at +0x38 and duplicate at +0x40.
+        let saved_hash = SAVED_CSS_HASH[entry_idx].load(Ordering::Relaxed);
+        let null_hash: u64 = 0xc1ffff0000000000;
+        let random_hash: u64 = 0xc100000fd5f7fa78;
+        if saved_hash != 0 && saved_hash != null_hash && saved_hash != random_hash {
+            core::ptr::write_volatile(main_bss.add(0x38) as *mut u64, saved_hash);
+            core::ptr::write_volatile(main_bss.add(0x40) as *mut u64, saved_hash);
         }
+
+        // Team color at +0x34.
+        let saved_team = SAVED_CSS_TEAM_COLOR[entry_idx].load(Ordering::Relaxed);
+        if saved_team >= 0 {
+            core::ptr::write_volatile(main_bss.add(0x34) as *mut i32, saved_team);
+        }
+    }
+
+    debug_log(&format!(
+        "restore_loop[{}]: is_cpu={} npad={} hash={:#018x} team={}",
+        entry_idx, saved_is_cpu,
+        SAVED_CSS_NPAD[entry_idx].load(Ordering::Relaxed),
+        SAVED_CSS_HASH[entry_idx].load(Ordering::Relaxed),
+        SAVED_CSS_TEAM_COLOR[entry_idx].load(Ordering::Relaxed),
+    ));
+
+}
+
+/// Inline hook on the restoration loop's back-edge `cmp x21, x23` instruction.
+/// The loop exits when X21 == X23 (counter equals bound). X23 is normally 2
+/// for training mode, limiting restoration to entries 0/1. This hook overrides
+/// X23 to saved_count so entries 2/3 are also processed by the game's own
+/// restoration logic (which correctly handles medals, panel images, etc.).
+///
+/// GDB-confirmed: X23 gets clobbered by `cset w23` in the loop body but is
+/// restored from the stack before reaching this point. Our override at the
+/// loop-body hook ($main+0x1843144) was therefore ineffective. This back-edge
+/// hook fires right before the `cmp`, after the restore, so our value sticks.
+#[skyline::hook(offset = OFFSET_CSS_RESTORE_LOOP_BOUND, inline)]
+pub unsafe fn css_restore_loop_bound_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
+    if saved_count > 2 {
+        ctx.registers[23].set_x(saved_count.min(4) as u64);
     }
 }
 
@@ -3589,57 +3816,18 @@ unsafe fn save_css_state_for_reentry() {
             core::ptr::read_volatile(panel.add(0x390) as *const i32),
             Ordering::Relaxed,
         );
+        // Save team color from our TEAM_COLORS global (persists across frames).
+        SAVED_CSS_TEAM_COLOR[i].store(
+            TEAM_COLORS[i].load(Ordering::Relaxed) as i32,
+            Ordering::Relaxed,
+        );
     }
     SAVED_CSS_SLOT_COUNT.store(count, Ordering::Relaxed);
     debug_log(&format!("save_css_state: {} slots saved", count));
 }
 
-/// BSS offsets for the CSS data arrays.
-/// Main array: $main + 0x5307770, stride 0x1C8 per entry.
-/// Second array (controller/tag): $main + 0x53085B0, stride 0x240 per entry.
-const BSS_CSS_DATA_ARRAY: usize = 0x5307770;
-const BSS_CSS_DATA_STRIDE: usize = 0x1C8;
-const BSS_CSS_SECOND_ARRAY: usize = 0x53085B0;
+/// Second BSS array stride (used by inline hook for pre-writing NpadId).
 const BSS_CSS_SECOND_STRIDE: usize = 0x240;
-
-/// Write saved CSS state to the BSS data arrays so the game's restoration
-/// loop picks up correct types, hashes, and controller info.
-/// Called from css_panel_layout_hook AFTER call_original!, before the
-/// restoration loop runs.
-unsafe fn write_saved_state_to_bss() {
-    use skyline::hooks::{getRegionAddress, Region};
-    let text_base = getRegionAddress(Region::Text) as usize;
-    if text_base == 0 {
-        return;
-    }
-
-    let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
-
-    for i in 1..saved_count.min(4) {
-        let saved_is_cpu = SAVED_CSS_IS_CPU[i].load(Ordering::Relaxed);
-        let saved_hash = SAVED_CSS_HASH[i].load(Ordering::Relaxed);
-
-        // Compute BSS entry address using raw arithmetic to avoid ptr overflow.
-        let bss_addr = text_base + BSS_CSS_DATA_ARRAY + i * BSS_CSS_DATA_STRIDE;
-        let target_type: i32 = if saved_is_cpu == 0 { 0 } else { 1 };
-
-        // Write type at +0x30.
-        core::ptr::write_volatile((bss_addr + 0x30) as *mut i32, target_type);
-
-        // Write hash at +0x38 and duplicate at +0x40.
-        let null_hash: u64 = 0xc1ffff0000000000;
-        let random_hash: u64 = 0xc100000fd5f7fa78;
-        if saved_hash != 0 && saved_hash != null_hash && saved_hash != random_hash {
-            core::ptr::write_volatile((bss_addr + 0x38) as *mut u64, saved_hash);
-            core::ptr::write_volatile((bss_addr + 0x40) as *mut u64, saved_hash);
-        }
-
-        debug_log(&format!(
-            "write_bss: entry={} type={} hash={:#018x}",
-            i, target_type, saved_hash
-        ));
-    }
-}
 
 /// One-shot restore of CSS panel states from saved data (LEGACY).
 /// Kept for reference — the BSS-write approach in write_saved_state_to_bss
