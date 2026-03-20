@@ -1263,6 +1263,18 @@ static OUTLINE_INIT_PENDING: AtomicBool = AtomicBool::new(false);
 /// flag; returns 1 when the toggle animation completes.
 const OFFSET_BTN_RULE_HANDLER: usize = 0x1db1910;
 
+/// Offset of resolve_ui_chara_hash_to_kind (FUN_7103262130): resolves a ui_chara
+/// hash to fighter_kind via binary search. Returns kind (i32) or -1/0x77 on failure.
+const OFFSET_RESOLVE_HASH_TO_KIND: usize = 0x3262130;
+
+/// Offset of check_char_availability (FUN_7103262710): returns character availability
+/// state: 0=available, 1=locked(base), 2=DLC not purchased, 3=DLC available, 4=unknown.
+const OFFSET_CHECK_CHAR_AVAILABILITY: usize = 0x3262710;
+
+/// BSS root for the game's resource/character database manager.
+/// DAT_710532e730 → *(+8) → inner; *(inner+0x168) = hash DB struct pointer.
+const CHAR_DB_ROOT_BSS: usize = 0x532e730;
+
 /// Team mode flag — persists across training resets, toggled at CSS.
 /// true = Team Battle, false = Solo Battle (default).
 static TEAM_MODE: AtomicBool = AtomicBool::new(false);
@@ -1782,9 +1794,41 @@ const VALID_RANDOM_POOL: &[(i32, u64)] = &[
 /// Simple LCG state for random fighter selection.
 static RNG_STATE: AtomicU64 = AtomicU64::new(0);
 
-/// Pick a random (css_kind, ui_chara_hash) from VALID_RANDOM_POOL using LCG PRNG.
+/// Get the hash DB pointer used by the game's character database functions.
+/// Pointer chain: DAT_710532e730 → *(+8) → *(+0x168) = hash DB struct ptr.
+/// Returns 0 on failure (null at any level).
+unsafe fn get_hash_db() -> usize {
+    let text_base = skyline::hooks::getRegionAddress(
+        skyline::hooks::Region::Text,
+    ) as usize;
+    let root = core::ptr::read_volatile((text_base + CHAR_DB_ROOT_BSS) as *const usize);
+    if root == 0 { return 0; }
+    let inner = core::ptr::read_volatile((root + 8) as *const usize);
+    if inner == 0 { return 0; }
+    core::ptr::read_volatile((inner + 0x168) as *const usize)
+}
+
+/// Check character availability via the game's native state function.
+/// Returns: 0=available, 1=locked(base), 2=DLC not purchased, 3=DLC available,
+/// 4=unknown. Returns -1 on failure (null pointers).
+unsafe fn check_char_availability(hash: u64) -> i32 {
+    let hash_db = get_hash_db();
+    if hash_db == 0 { return -1; }
+    let text_base = skyline::hooks::getRegionAddress(
+        skyline::hooks::Region::Text,
+    ) as usize;
+    type CheckFn = unsafe extern "C" fn(usize, u64) -> i64;
+    let check: CheckFn = core::mem::transmute(text_base + OFFSET_CHECK_CHAR_AVAILABILITY);
+    check(hash_db, hash) as i32
+}
+
+/// Pick a random (fighter_kind, ui_chara_hash) from VALID_RANDOM_POOL using LCG PRNG.
 /// Seeded lazily from CSS panel pointer addresses (vary with ASLR/allocation)
 /// so different CSS sessions produce different sequences.
+///
+/// Each pick is validated: the character must be available (state 0 or 3) per the
+/// game's native availability check. This gates out locked base-game characters and
+/// unpurchased DLC on setups where not everything is unlocked (e.g. Yuzu).
 fn pick_random_character() -> (i32, u64) {
     let mut state = RNG_STATE.load(Ordering::Relaxed);
     if state == 0 {
@@ -1797,9 +1841,25 @@ fn pick_random_character() -> (i32, u64) {
             state = 0xCAFE_BABE;
         }
     }
-    state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407);
+
+    // Try up to 10 picks, validating availability through the game's native check.
+    for _attempt in 0..10 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+
+        let index = ((state >> 33) as usize) % VALID_RANDOM_POOL.len();
+        let (kind, hash) = VALID_RANDOM_POOL[index];
+
+        let avail = unsafe { check_char_availability(hash) };
+        // 0 = available (base game), 3 = DLC available. Reject 1 (locked), 2 (not purchased).
+        if avail == 0 || avail == 3 {
+            RNG_STATE.store(state, Ordering::Relaxed);
+            return (kind, hash);
+        }
+    }
+
+    // Fallback: all 10 attempts were unavailable. Use the last pick anyway.
     RNG_STATE.store(state, Ordering::Relaxed);
     let index = ((state >> 33) as usize) % VALID_RANDOM_POOL.len();
     VALID_RANDOM_POOL[index]
@@ -2413,9 +2473,11 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
 
     // Directional trio arrows: set_parts_arrow_{l,r}_%02d (0-indexed).
     // Arrow anim_trans_list: anim[0]=arrow_anim, anim[1]=arrow_color.
+    // Green(2) needs +1 offset (frame 13 instead of 12) — 12 shows dark blue.
     for i in 0..4usize {
         let color = TEAM_COLORS[i].load(Ordering::Relaxed);
-        let target_frame = 10.0 + color as f32;
+        let target_frame = 10.0 + color as f32
+            + if color == 2 { 3.0 } else { 0.0 };
 
         for prefix in &["set_parts_arrow_l_", "set_parts_arrow_r_"] {
             let name = format!("{}{:02}", prefix, i);
@@ -3001,6 +3063,12 @@ static SAVED_CSS_NPAD: [AtomicI32; 4] = [
 static SAVED_CSS_TEAM_COLOR: [AtomicI32; 4] = [
     AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1),
 ];
+/// Saved secondary hash (panel+0x208) for CSS re-entry.
+/// For Pokemon Trainer, this is the active sub-starter's hash (Squirtle/Ivysaur/
+/// Charizard). Restored to main_bss+0x40 so the CSS shows the correct sub-starter.
+static SAVED_CSS_SECONDARY_HASH: [AtomicU64; 4] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
 
 /// Snapshot panel pointers from the scene's panel vector at scene+0x250.
 unsafe fn cache_panel_ptrs(scene: *const u8) {
@@ -3146,13 +3214,19 @@ pub unsafe fn css_restore_loop_hook(ctx: &mut skyline::hooks::InlineCtx) {
         let target_type: i32 = if saved_is_cpu == 0 { 0 } else { 1 };
         core::ptr::write_volatile(main_bss.add(0x30) as *mut i32, target_type);
 
-        // Hash at +0x38 and duplicate at +0x40.
+        // Primary hash at +0x38, secondary hash at +0x40.
+        // +0x40 was previously written as a duplicate of +0x38, but for Pokemon
+        // Trainer it must be the sub-starter's hash (Squirtle/Ivysaur/Charizard)
+        // so the CSS panel shows the correct sub-starter on re-entry.
         let saved_hash = SAVED_CSS_HASH[entry_idx].load(Ordering::Relaxed);
+        let saved_secondary = SAVED_CSS_SECONDARY_HASH[entry_idx].load(Ordering::Relaxed);
         let null_hash: u64 = 0xc1ffff0000000000;
         let random_hash: u64 = 0xc100000fd5f7fa78;
         if saved_hash != 0 && saved_hash != null_hash && saved_hash != random_hash {
             core::ptr::write_volatile(main_bss.add(0x38) as *mut u64, saved_hash);
-            core::ptr::write_volatile(main_bss.add(0x40) as *mut u64, saved_hash);
+            // Use secondary hash if saved, otherwise fall back to primary.
+            let secondary = if saved_secondary != 0 { saved_secondary } else { saved_hash };
+            core::ptr::write_volatile(main_bss.add(0x40) as *mut u64, secondary);
         }
 
         // Team color at +0x34.
@@ -3575,8 +3649,38 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
                 entry_index, kind, written_db, hash
             ));
         } else if panel_hash != 0 {
-            // Normal character: override hash from CSS panel.
-            core::ptr::write_volatile(config.add(0x88) as *mut u64, panel_hash);
+            // Pokemon Trainer (db_index 38): the trainer itself has no fighter_kind
+            // in the game's hash resolver — it returns -1, causing clone_write to
+            // default to kind 0 (Mario). The native CSS resolves PT to a sub-starter
+            // (Squirtle/Ivysaur/Charizard) before the config is built, but our
+            // mod-added P3/P4 panels don't go through that resolution.
+            // Fix: read the panel's secondary hash (panel+0x208) which stores the
+            // active sub-starter. css_panel_set_chara_hash writes it there, and the
+            // CSS cycling (A button) updates it. Falls back to Squirtle if unset.
+            let write_hash = if db_idx == 38 {
+                const SQUIRTLE_HASH: u64 = ui_hash(39, 0x1280f1c82e);
+                const IVYSAUR_HASH: u64 = ui_hash(40, 0x14ef73f367);
+                const CHARIZARD_HASH: u64 = ui_hash(41, 0x12915a4ff6);
+
+                let sub_hash = read_css_panel_secondary_hash(entry_index);
+                let sub_db = if sub_hash != 0 { db_index_from_hash(sub_hash) } else { -1 };
+                let resolved = match sub_db {
+                    39 => SQUIRTLE_HASH,
+                    40 => IVYSAUR_HASH,
+                    41 => CHARIZARD_HASH,
+                    _ => SQUIRTLE_HASH, // default if secondary hash is unset/invalid
+                };
+                debug_log(&format!(
+                    "clone_write: entry={} PT detected, sub_hash={:#018x} sub_db={} → {:#018x}",
+                    entry_index, sub_hash, sub_db, resolved
+                ));
+                resolved
+            } else {
+                panel_hash
+            };
+
+            // Normal character (or PT→sub-starter substitution): override config hash.
+            core::ptr::write_volatile(config.add(0x88) as *mut u64, write_hash);
             // Derive fighter_kind from the hash for special characters where
             // css_confirm returns the wrong value (e.g. Pokemon Trainer → 0).
             let derived_kind = fighter_kind_from_db_index(db_idx);
@@ -3695,6 +3799,27 @@ unsafe fn read_css_panel_hash(entry_index: u32) -> u64 {
             "read_css_panel_hash: entry={} FAIL bad_hash={:#018x} panel={:#x}",
             entry_index, hash, panel as usize
         ));
+        0
+    }
+}
+
+/// Read the secondary ui_chara hash from the cached CSS panel for `entry_index`.
+/// panel+0x208: u64, set by css_panel_set_chara_hash alongside the primary hash.
+/// For Pokemon Trainer, this stores the active sub-starter's hash (Squirtle/
+/// Ivysaur/Charizard), updated when the player cycles with A on the CSS.
+/// Returns 0 on failure.
+unsafe fn read_css_panel_secondary_hash(entry_index: u32) -> u64 {
+    if entry_index as usize >= CSS_PANEL_PTRS.len() {
+        return 0;
+    }
+    let panel = CSS_PANEL_PTRS[entry_index as usize].load(Ordering::Relaxed) as *const u8;
+    if panel.is_null() {
+        return 0;
+    }
+    let hash = core::ptr::read_volatile(panel.add(0x208) as *const u64);
+    if (hash & 0xFF00000000000000) == 0xC100000000000000 && (hash & 0xFFFFFFFFFF) != 0 {
+        hash
+    } else {
         0
     }
 }
@@ -3819,6 +3944,11 @@ unsafe fn save_css_state_for_reentry() {
         // Save team color from our TEAM_COLORS global (persists across frames).
         SAVED_CSS_TEAM_COLOR[i].store(
             TEAM_COLORS[i].load(Ordering::Relaxed) as i32,
+            Ordering::Relaxed,
+        );
+        // Save secondary hash (panel+0x208) for PT sub-starter restoration.
+        SAVED_CSS_SECONDARY_HASH[i].store(
+            core::ptr::read_volatile(panel.add(0x208) as *const u64),
             Ordering::Relaxed,
         );
     }
