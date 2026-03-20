@@ -2411,6 +2411,27 @@ pub unsafe fn loupe_radar_diagnostic_dump(root_pane: &Pane, layout_name: &str) {
                 probe_parts_anim(pane_l, &name_l);
                 probe_parts_anim(pane_r, &name_r);
             }
+            // Probe arrow sub-pane materials: arrow_l_a vs arrow_l for two-tone.
+            // Only probe P1 left arrow (set_parts_arrow_l_00) for brevity.
+            let arrow_parts = find_pane_by_name(root_pane as *const Pane, "set_parts_arrow_l_00");
+            if !arrow_parts.is_null() {
+                for sub_name in &["arrow_l_a", "arrow_l", "arrow_c_a", "arrow_c", "arrow_r_a", "arrow_r"] {
+                    let sub = (*(arrow_parts as *const Pane)).find_pane_by_name_recursive(sub_name);
+                    if let Some(p) = sub {
+                        // Try as Picture pane (material at as_picture())
+                        let picture = p.as_picture();
+                        let mat = &*picture.material;
+                        let w = read_material_color(mat, MaterialColorType::WhiteColor);
+                        let b = read_material_color(mat, MaterialColorType::BlackColor);
+                        debug_log(&format!(
+                            "  ARROW_MAT {}: white=({},{},{},{}) black=({},{},{},{})",
+                            sub_name, w.r, w.g, w.b, w.a, b.r, b.g, b.b, b.a
+                        ));
+                    } else {
+                        debug_log(&format!("  ARROW_MAT {}: pane NOT FOUND", sub_name));
+                    }
+                }
+            }
             debug_log("=== END LOUPE ANIM PROBE ===");
         }
         "info_radar_a" => {
@@ -2472,12 +2493,24 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
     }
 
     // Directional trio arrows: set_parts_arrow_{l,r}_%02d (0-indexed).
-    // Arrow anim_trans_list: anim[0]=arrow_anim, anim[1]=arrow_color.
-    // Green(2) needs +1 offset (frame 13 instead of 12) — 12 shows dark blue.
+    // Two-tone mechanism:
+    //   - _a panes (arrow_l_a etc): colored by arrow_color animation (light variant)
+    //   - inner panes (arrow_l etc): colored by material black_color (dark variant)
+    //   - arrow_anim alternates visibility between them
+    // Arrow color paired frames: 9/10=Red, 11/12=Blue, 13/14=Yellow, 15/16=Green.
+    const ARROW_COLOR_FRAME: [f32; 4] = [9.0, 11.0, 15.0, 13.0];
+    //                       team_color: Red   Blue  Green Yellow
+    // Dark variant material colors for inner panes (matching vanilla P1 red = 255,4,4,0).
+    const ARROW_DARK_COLOR: [ResColor; 4] = [
+        ResColor { r: 255, g: 4, b: 4, a: 0 },     // Red
+        ResColor { r: 4, g: 4, b: 255, a: 0 },      // Blue
+        ResColor { r: 4, g: 255, b: 4, a: 0 },      // Green
+        ResColor { r: 255, g: 255, b: 4, a: 0 },    // Yellow
+    ];
     for i in 0..4usize {
-        let color = TEAM_COLORS[i].load(Ordering::Relaxed);
-        let target_frame = 10.0 + color as f32
-            + if color == 2 { 3.0 } else { 0.0 };
+        let color = TEAM_COLORS[i].load(Ordering::Relaxed).min(3) as usize;
+        let target_frame = ARROW_COLOR_FRAME[color];
+        let dark_color = &ARROW_DARK_COLOR[color];
 
         for prefix in &["set_parts_arrow_l_", "set_parts_arrow_r_"] {
             let name = format!("{}{:02}", prefix, i);
@@ -2493,6 +2526,14 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
                 if second_node.is_null() || std::ptr::eq(second_node, anim_root) { continue; }
                 let anim_transform = (second_node as *mut u64).add(2) as *mut AnimTransform;
                 (*anim_transform).frame = target_frame;
+
+                // Also write dark color to inner panes' material black_color.
+                for inner_name in &["arrow_l", "arrow_c", "arrow_r"] {
+                    if let Some(inner) = pane.find_pane_by_name_recursive(inner_name) {
+                        let mat = &mut *inner.as_picture().material;
+                        mat.set_black_res_color(*dark_color);
+                    }
+                }
             }
         }
     }
