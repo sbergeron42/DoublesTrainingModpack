@@ -25,6 +25,7 @@ use crate::common::is_dead;
 use crate::common::MENU;
 use crate::is_operation_cpu;
 use crate::training::buff;
+use crate::training::doubles;
 use crate::training::character_specific::{ptrainer, steve};
 use crate::training::charge::{self, ChargeState};
 use crate::training::input_record;
@@ -483,7 +484,7 @@ pub unsafe fn save_states(module_accessor: &mut app::BattleObjectModuleAccessor)
             std::sync::atomic::Ordering::Relaxed,
         );
     }
-    let is_cpu = entry_id != 0;
+    let is_cpu = !doubles::is_human_entry(entry_id);
     let save_state = save_state_for_entry(entry_id, selected_slot);
 
     let fighter_kind = app::utility::get_kind(module_accessor);

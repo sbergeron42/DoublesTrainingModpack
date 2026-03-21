@@ -323,6 +323,20 @@ pub unsafe fn set_cpu_hit_team(module_accessor: &mut BattleObjectModuleAccessor)
         set_outline_team_color(entry_id, team_color);
     }
 
+    // Sync fi_data team color and is_operation_cpu flag every frame.
+    // The game's smoke trail code (FUN_710068f530) reads fi_data+0x92
+    // directly — when non-zero it returns gray (8) instead of the team
+    // color at fi_data+0x84.  Our is_operation_cpu() hook returns false
+    // for human entries, but the smoke code bypasses it via raw memory.
+    // Fix: clear the raw flag for human entries so they get team-colored
+    // trails, and ensure fi_data+0x84 holds the team color even when
+    // outlines are disabled.
+    if is_team_mode() && (entry_id as usize) < 4 {
+        let team_color = TEAM_COLORS[entry_id as usize].load(Ordering::Relaxed);
+        let is_human = entry_id == 0 || is_human_entry(entry_id);
+        sync_fi_data_cpu_flag(entry_id, team_color, is_human);
+    }
+
     // Skip if already applied — team values don't change mid-match.
     if (entry_id as usize) < 4 && HIT_TEAM_APPLIED[entry_id as usize].load(Ordering::Relaxed) {
         return;
@@ -379,6 +393,42 @@ unsafe fn set_outline_team_color(entry_id: i32, team_color: u32) {
     // entry+0x30: source field that the game's init copies to fi_data+0x2C.
     // Writing it ensures any re-initialization picks up the correct color.
     *((entry_ptr + 0x30) as *mut u32) = team_color;
+}
+
+/// Sync fi_data+0x84 (team color for effects) and fi_data+0x92 (is_operation_cpu
+/// flag) for a fighter entry. The game's knockback smoke trail function reads
+/// fi_data+0x92 directly: non-zero → gray trail, zero → team-colored trail
+/// using fi_data+0x84. This is independent of outlines.
+///
+/// Navigation: same pointer chain as set_outline_team_color.
+unsafe fn sync_fi_data_cpu_flag(entry_id: i32, team_color: u32, is_human: bool) {
+    let fm_singleton_ptr = read(&FIGHTER_MANAGER_ADDR);
+    if fm_singleton_ptr == 0 {
+        return;
+    }
+    let fm = *(fm_singleton_ptr as *const usize);
+    if fm == 0 {
+        return;
+    }
+    let inner = *(fm as *const usize);
+    if inner == 0 {
+        return;
+    }
+    let entry_ptr = *((inner + (entry_id as usize) * 8 + 0x20) as *const usize);
+    if entry_ptr == 0 {
+        return;
+    }
+    let fi_data = *((entry_ptr + 0xF8) as *const usize);
+    if fi_data == 0 {
+        return;
+    }
+    // fi_data+0x84: team color index used by get_team_color → smoke trail, effects.
+    *((fi_data + 0x84) as *mut u32) = team_color;
+    // fi_data+0x92: is_operation_cpu raw flag. Clear for human entries so the
+    // smoke trail code returns the team color instead of 8 (gray).
+    if is_human {
+        *((fi_data + 0x92) as *mut u8) = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,16 +1345,18 @@ fn team_outlines_enabled() -> bool {
 }
 
 /// Keep vanilla is_team_battle() in sync with our TEAM_MODE flag.
-/// Only sets the flag when team outlines are enabled — the flag controls
-/// renderer outline drawing. Hit-team logic is independent (uses
-/// TeamModule::set_hit_team / set_team directly).
+/// Always set when team mode is active — the flag controls the INT_ARRAY
+/// color mapping in get_team_color(), which is needed by smoke trails,
+/// HUD elements, and all other effect systems (10+ callers).
+/// Outline *colors* are separately controlled by set_outline_team_color
+/// writing fi_data+0x2C, gated on team_outlines_enabled().
 /// Called once per frame from once_per_frame_per_fighter (entry 0).
 pub unsafe fn sync_team_battle_flag() {
     let text_base = skyline::hooks::getRegionAddress(
         skyline::hooks::Region::Text,
     ) as usize;
     let flag_ptr = (text_base + TEAM_BATTLE_FLAG_BSS) as *mut u8;
-    let desired = if TEAM_MODE.load(Ordering::Relaxed) && team_outlines_enabled() {
+    let desired = if TEAM_MODE.load(Ordering::Relaxed) {
         1u8
     } else {
         0u8
