@@ -395,10 +395,13 @@ unsafe fn set_outline_team_color(entry_id: i32, team_color: u32) {
     *((entry_ptr + 0x30) as *mut u32) = team_color;
 }
 
-/// Sync fi_data+0x84 (team color for effects) and fi_data+0x92 (is_operation_cpu
-/// flag) for a fighter entry. The game's knockback smoke trail function reads
-/// fi_data+0x92 directly: non-zero → gray trail, zero → team-colored trail
-/// using fi_data+0x84. This is independent of outlines.
+/// Sync fi_data fields that control team-colored visuals for a fighter entry:
+///   +0x30 (i16): 1-indexed color slot used by training-mode code path in the
+///         color determination function. 0 → gray, (color+1) → team color.
+///   +0x84 (u32): team color index used by the normal code path (smoke trails).
+///   +0x92 (u8):  is_operation_cpu raw flag. Non-zero → gray in normal path.
+/// Human entries get all three set so shields, smoke trails, and effects are
+/// team-colored. CPU entries keep defaults (gray).
 ///
 /// Navigation: same pointer chain as set_outline_team_color.
 unsafe fn sync_fi_data_cpu_flag(entry_id: i32, team_color: u32, is_human: bool) {
@@ -424,9 +427,12 @@ unsafe fn sync_fi_data_cpu_flag(entry_id: i32, team_color: u32, is_human: bool) 
     }
     // fi_data+0x84: team color index used by get_team_color → smoke trail, effects.
     *((fi_data + 0x84) as *mut u32) = team_color;
-    // fi_data+0x92: is_operation_cpu raw flag. Clear for human entries so the
-    // smoke trail code returns the team color instead of 8 (gray).
     if is_human {
+        // fi_data+0x30 (i16): 1-indexed color slot for the training-mode path.
+        // When 0 the game returns gray (8); (team_color + 1) yields team color.
+        *((fi_data + 0x30) as *mut i16) = (team_color as i16) + 1;
+        // fi_data+0x92: is_operation_cpu raw flag — clear so the normal path
+        // also returns team color instead of 8 (gray).
         *((fi_data + 0x92) as *mut u8) = 0;
     }
 }
