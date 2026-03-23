@@ -112,6 +112,20 @@ static NEEDLE_SET_CPU_CONTROLS: &[u8] = &[
 ];
 impl_offset!(SET_CPU_CONTROLS);
 
+// OFFSET_FIGHTER_AI_INIT = 0x658ad0  (FUN_7100658ad0 in 13.0.1)
+// Called once per FighterEntry on first spawn. Creates Lua AI agents,
+// loads character AI scripts, sets rank. Agent count at param+0x28.
+static NEEDLE_FIGHTER_AI_INIT: &[u8] = &[
+    0xff, 0x8c, 0x01, 0xd1, // sub  sp, sp, #0x60
+    0xf8, 0x5f, 0x02, 0xa9, // stp  x24, x23, [sp, #0x20]
+    0xf6, 0x57, 0x03, 0xa9, // stp  x22, x21, [sp, #0x30]
+    0xf4, 0x4f, 0x04, 0xa9, // stp  x20, x19, [sp, #0x40]
+    0xfd, 0x77, 0x05, 0xa9, // stp  x29, x30, [sp, #0x50]
+    0xfd, 0x43, 0x01, 0x91, // add  x29, sp, #0x50
+    0x08, 0xa8, 0x20, 0xf9, // ldr  x8, [x0, #0x4150]
+];
+impl_offset!(FIGHTER_AI_INIT);
+
 // OFFSET_ADD_DAMAGE = 0x3ff9c0
 static NEEDLE_ADD_DAMAGE: &[u8] = &[
     0x08, 0x20, 0x20, 0x1e,

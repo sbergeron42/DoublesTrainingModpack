@@ -509,11 +509,30 @@ pub unsafe fn handle_final_input_mapping(player_idx: i32, out: *mut MappedInputs
     }
 }
 
-#[skyline::hook(offset = *OFFSET_SET_CPU_CONTROLS)] // After cpu controls are assigned from ai calls
+#[skyline::hook(offset = *OFFSET_SET_CPU_CONTROLS)]
 unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
     use crate::training::doubles;
 
     let controller_data = *p_data.add(1) as *mut ControlModuleInternal;
+
+    // Override per-fighter AI rank (self+0xC0C) before the training mode
+    // CPU behavior system reads it. Ghidra confirms set_cpu_controls reads
+    // rank from x19+0xC0C (x19=x0=p_data), NOT from TRAINING_MENU_ADDR.
+    // Each fighter has its OWN inner struct, so writing is permanent and
+    // also benefits Lua AI scripts (app::ai::rank reads the same field).
+    // The Nth call (1-indexed) = entry N.
+    if is_training_mode() && doubles::is_team_mode() {
+        let entry_id = doubles::peek_cpu_controls_entry();
+        if entry_id >= 1 && entry_id <= 3 {
+            let level = doubles::RUNTIME_CPU_LEVEL[entry_id as usize]
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if level > 0 {
+                let rank_ptr = (p_data as *mut u8).add(0xC0C) as *mut i32;
+                let rank = doubles::css_level_to_ai_rank(level as u8) as i32;
+                core::ptr::write_volatile(rank_ptr, rank);
+            }
+        }
+    }
 
     call_original!(p_data);
 

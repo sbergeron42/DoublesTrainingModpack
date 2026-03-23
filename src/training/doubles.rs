@@ -304,12 +304,23 @@ static HIT_TEAM_APPLIED: [AtomicBool; 4] = [
     AtomicBool::new(false), AtomicBool::new(false),
 ];
 
+/// One-shot diagnostic flag (can be removed after AI rank investigation).
+static AI_RANK_PROBED: AtomicBool = AtomicBool::new(false);
+
+/// Per-entry CSS CPU level (1-9) for runtime AI rank override.
+/// Populated by clone_write_hook. Entry 0 = P1 (human, unused).
+/// set_cpu_controls reads rank from self+0xC0C — we override it per-fighter.
+pub static RUNTIME_CPU_LEVEL: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+
 /// Call when team assignments may have changed (CSS re-entry, team toggle)
 /// so hit-teams get re-applied on next frame.
 pub fn invalidate_hit_teams() {
     for flag in &HIT_TEAM_APPLIED {
         flag.store(false, Ordering::Relaxed);
     }
+    AI_RANK_PROBED.store(false, Ordering::Relaxed);
 }
 
 pub unsafe fn set_cpu_hit_team(module_accessor: &mut BattleObjectModuleAccessor) {
@@ -630,6 +641,12 @@ static SET_CPU_CONTROLS_COUNTER: AtomicI32 = AtomicI32::new(0);
 /// Called from FIM hook (player_idx==0) once per frame to reset the counter.
 pub fn reset_cpu_controls_counter() {
     SET_CPU_CONTROLS_COUNTER.store(0, Ordering::Relaxed);
+}
+
+/// Peek at which entry the next set_cpu_controls call will process,
+/// WITHOUT incrementing the counter. Returns counter + 1 (1-indexed entry_id).
+pub fn peek_cpu_controls_entry() -> i32 {
+    SET_CPU_CONTROLS_COUNTER.load(Ordering::Relaxed) + 1
 }
 
 /// Tracks which hardware npad each human entry is assigned to.
@@ -1313,6 +1330,11 @@ static DEFERRED_P2_TOGGLE: AtomicBool = AtomicBool::new(false);
 /// One-shot flag: set by clone_write_hook (entry 0), consumed by game_tick_hook.
 /// Signals that fi_data+0x2C must be written before the first render pass.
 static OUTLINE_INIT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// One-shot flag: set by css_restore_loop_hook, consumed by css_btn_rule_draw.
+/// Signals that saved CPU levels should be written to panels after the game's
+/// CSS restoration loop finishes (which resets P3/P4 levels to default).
+static DEFERRED_CPU_LEVEL_RESTORE: AtomicBool = AtomicBool::new(false);
 
 /// Offset of FUN_7101db1910 (btn_rule handler): manages the Solo/Team toggle
 /// button on the CSS. Reads scene_obj+0x44d as a transient "press in progress"
@@ -2639,6 +2661,52 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
     // Poll P1 controller for team mode toggle (X button).
     poll_css_team_toggle();
 
+    // Deferred CPU level restore: write saved levels to P3/P4 panels after
+    // the game's CSS restoration loop has finished resetting them to default.
+    if DEFERRED_CPU_LEVEL_RESTORE.swap(false, Ordering::Relaxed) {
+        let saved_count = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed);
+        let text_base = skyline::hooks::getRegionAddress(
+            skyline::hooks::Region::Text,
+        ) as usize;
+        // FUN_7103779cd0: format number text (pane, fmt_str, arg_count, value)
+        type FmtNumFn = unsafe extern "C" fn(*mut u8, *const u8, i32, i32);
+        let fmt_num: FmtNumFn = core::mem::transmute(text_base + 0x3779cd0);
+        // FUN_7103777e80: format string text (pane, fmt_str, value)
+        type FmtStrFn = unsafe extern "C" fn(*mut u8, *const u8, i32);
+        let fmt_str: FmtStrFn = core::mem::transmute(text_base + 0x3777e80);
+
+        for i in 1..saved_count.min(4) {
+            let saved_level = SAVED_CSS_CPU_LEVEL[i].load(Ordering::Relaxed) as u8;
+            if saved_level == 0 {
+                continue;
+            }
+            let panel = CSS_PANEL_PTRS[i].load(Ordering::Relaxed) as *mut u8;
+            if panel.is_null() {
+                continue;
+            }
+            // Only restore for CPU panels.
+            let panel_type = core::ptr::read_volatile(panel.add(0x1F8) as *const u32);
+            if panel_type != 1 {
+                continue;
+            }
+            // Write internal level byte (panel+0x211).
+            core::ptr::write_volatile(panel.add(0x211) as *mut u8, saved_level);
+            // Write display level int to sub_obj+0x250 and refresh text.
+            let sub_obj = core::ptr::read_volatile(panel.add(0x5e8) as *const usize);
+            if sub_obj != 0 {
+                let sub = sub_obj as *mut u8;
+                core::ptr::write_volatile(sub.add(0x250) as *mut i32, saved_level as i32);
+                // Update "LV.X" number text at sub_obj+0x88.
+                fmt_num(sub.add(0x88), b"mel_chara_select_lv_n\0".as_ptr(), 1, saved_level as i32);
+                // Update "cp_level_N" icon at sub_obj+0x68.
+                fmt_str(sub.add(0x68), b"cp_level_%d\0".as_ptr(), *(sub.add(0x250) as *const i32));
+            }
+            debug_log(&format!(
+                "css_draw: restored cpu_lv={} for entry={}", saved_level, i
+            ));
+        }
+    }
+
     // One-shot probe of hand/medal AnimTransform data (DISABLED — crashes on stale pane ptr).
     // css_probe_hand_medal(root_pane);
 
@@ -3168,6 +3236,10 @@ static SAVED_CSS_TEAM_COLOR: [AtomicI32; 4] = [
 static SAVED_CSS_SECONDARY_HASH: [AtomicU64; 4] = [
     AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
 ];
+/// Saved CPU level (panel+0x211, 1-9) for CSS re-entry.
+static SAVED_CSS_CPU_LEVEL: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
 
 /// Snapshot panel pointers from the scene's panel vector at scene+0x250.
 unsafe fn cache_panel_ptrs(scene: *const u8) {
@@ -3281,6 +3353,13 @@ pub unsafe fn css_restore_loop_hook(ctx: &mut skyline::hooks::InlineCtx) {
                 }
             }
             // CPU entries: -1 is correct (already reset), no write needed.
+        }
+
+        // Schedule deferred CPU level restore — the game's restoration loop
+        // resets P3/P4 levels to default, so we write saved levels to panels
+        // after the loop finishes (consumed by css_btn_rule_draw).
+        if saved_count > 1 {
+            DEFERRED_CPU_LEVEL_RESTORE.store(true, Ordering::Relaxed);
         }
 
         debug_log(&format!(
@@ -3596,6 +3675,25 @@ pub unsafe fn lua_ai_orchestrator_hook(ai_mgr: *mut u8) {
     let count = *(ai_mgr.add(0x28) as *const i32);
     let max = (count as usize).min(4);
 
+    // One-shot diagnostic: log agent array state to confirm entries 2/3 have agents.
+    static AI_AGENT_LOGGED: AtomicBool = AtomicBool::new(false);
+    if is_team_mode() && !AI_AGENT_LOGGED.swap(true, Ordering::Relaxed) {
+        let mut msg = format!("AI_AGENTS: count={}", count);
+        for i in 0..4 {
+            let ptr = core::ptr::read_volatile(entry_base.add(i));
+            if ptr != 0 {
+                let inner = *(ptr as *const usize).add(0x58 / 8); // outer+0x58 = inner
+                let rank = if inner != 0 {
+                    core::ptr::read_volatile((inner + 0xC0C) as *const i32)
+                } else { -1 };
+                msg.push_str(&format!(" [{}]=0x{:x}(rank={})", i, ptr, rank));
+            } else {
+                msg.push_str(&format!(" [{}]=NULL", i));
+            }
+        }
+        debug_log(&msg);
+    }
+
     // Save and NULL human entries (skip index 0 — post-loop dereferences it)
     let mut saved: [(usize, usize); 3] = [(0, 0); 3];
     let mut n = 0usize;
@@ -3672,6 +3770,9 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         let config_type = core::ptr::read_volatile(config.add(0x78) as *const i32);
         let is_entry1_human = config_type == 0;
         CSS_ENTRY_IS_HUMAN[1].store(is_entry1_human, Ordering::Relaxed);
+        // Save entry 1's CSS level for runtime self+0xC0C rank override.
+        let entry1_level = core::ptr::read_volatile(config.add(0x91) as *const u8);
+        RUNTIME_CPU_LEVEL[1].store(entry1_level as u32, Ordering::Relaxed);
         // Read tag/profile index — prefer CSS panel (config may have P1's tag
         // from the shared buffer), fall back to config[0x214].
         let config_tag = core::ptr::read_volatile(config.add(0x214) as *const u32);
@@ -3831,6 +3932,25 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
             core::ptr::write_volatile(config.add(0x90) as *mut u8, panel_costume);
         }
 
+        // Override CPU level so entries 2/3 get their CSS-selected level
+        // instead of CPU1's. Two config fields matter:
+        //   config[0x224] (u32) = AI rank (0-100), used FIRST by clone_write.
+        //   config[0x91]  (u8)  = CSS level (1-9), fallback when [0x224] > 100.
+        // Both must be overridden because clone_write takes config[0x224]
+        // directly when it's ≤100, bypassing the config[0x91] lookup entirely.
+        let saved_cpu_level = core::ptr::read_volatile(config.add(0x91) as *const u8);
+        let saved_ai_rank = core::ptr::read_volatile(config.add(0x224) as *const u32);
+        if is_cpu {
+            let panel_cpu_level = read_css_panel_cpu_level(entry_index);
+            if panel_cpu_level > 0 {
+                core::ptr::write_volatile(config.add(0x91) as *mut u8, panel_cpu_level);
+                let rank = css_level_to_ai_rank(panel_cpu_level) as u32;
+                core::ptr::write_volatile(config.add(0x224) as *mut u32, rank);
+                // Save for runtime self+0xC0C rank override in set_cpu_controls.
+                RUNTIME_CPU_LEVEL[entry_index as usize].store(panel_cpu_level as u32, Ordering::Relaxed);
+            }
+        }
+
         // Override tag/profile index so clone_write loads the correct button
         // mappings from the player's tag instead of CPU1's.
         // config[0x214] = tag index (used to look up profile at base + idx * 0xf7d8).
@@ -3844,19 +3964,32 @@ pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8,
         }
 
         debug_log(&format!(
-            "clone_write: entry={} is_cpu={} hash={:#018x} costume={} tag={}",
+            "clone_write: entry={} is_cpu={} hash={:#018x} costume={} tag={} cpu_lv={} ai_rank={}",
             entry_index, is_cpu,
             if panel_hash != 0 { panel_hash } else { saved_hash },
-            core::ptr::read_volatile(config.add(0x90) as *const u8), panel_tag
+            core::ptr::read_volatile(config.add(0x90) as *const u8), panel_tag,
+            core::ptr::read_volatile(config.add(0x91) as *const u8),
+            core::ptr::read_volatile(config.add(0x224) as *const u32)
         ));
 
         call_original!(config, entry_index, byte_flag, bss_out);
+
+        // Verify: read the AI rank that clone_write actually wrote to bss_out+0x79.
+        if !bss_out.is_null() {
+            let actual_rank = core::ptr::read_volatile(bss_out.add(0x79) as *const u8);
+            debug_log(&format!(
+                "clone_write: entry={} bss_out_rank={} (expected from config[0x224])",
+                entry_index, actual_rank
+            ));
+        }
 
         // Restore so the next call sees the original CPU1 values.
         core::ptr::write_volatile(config.add(0x88) as *mut u64, saved_hash);
         core::ptr::write_volatile(config.add(0x78) as *mut i32, saved_type);
         core::ptr::write_volatile(config.add(0x7C) as *mut i32, saved_npad);
         core::ptr::write_volatile(config.add(0x90) as *mut u8, saved_costume);
+        core::ptr::write_volatile(config.add(0x91) as *mut u8, saved_cpu_level);
+        core::ptr::write_volatile(config.add(0x224) as *mut u32, saved_ai_rank);
         core::ptr::write_volatile(config.add(0x214) as *mut u32, saved_tag);
 
         // Write team outline color to bss_out so fighter init picks it up.
@@ -3973,6 +4106,35 @@ unsafe fn read_css_panel_costume(entry_index: u32) -> u8 {
     core::ptr::read_volatile(panel.add(0x210))
 }
 
+/// Read the CPU level from the cached CSS panel for `entry_index`.
+/// panel+0x211: u8 CPU level (1-9), set by the CSS level picker.
+/// clone_write reads config[0x91] as the CSS level and converts it to an
+/// AI rank (0-100) via a lookup table. Without this override, entries 2/3
+/// always inherit CPU1's level from the shared config buffer.
+/// Returns 0 on failure (clone_write treats 0 as rank 0 = weakest).
+unsafe fn read_css_panel_cpu_level(entry_index: u32) -> u8 {
+    if entry_index as usize >= CSS_PANEL_PTRS.len() {
+        return 0;
+    }
+    let panel = CSS_PANEL_PTRS[entry_index as usize].load(Ordering::Relaxed) as *const u8;
+    if panel.is_null() {
+        return 0;
+    }
+    core::ptr::read_volatile(panel.add(0x211))
+}
+
+/// Convert a CSS CPU level (1-9) to the AI rank value (0-100) that
+/// clone_write stores at bss_out+0x79. Uses the same lookup table as
+/// the game's clone_write_entry_to_bss (constant 0x644b3c302a1f150f).
+pub fn css_level_to_ai_rank(css_level: u8) -> u8 {
+    const RANK_TABLE: [u8; 10] = [0, 0, 15, 21, 31, 42, 48, 60, 75, 100];
+    if (css_level as usize) < RANK_TABLE.len() {
+        RANK_TABLE[css_level as usize]
+    } else {
+        0
+    }
+}
+
 /// Read the hardware npad from the cached CSS panel for `entry_index`.
 /// Scans several candidate offsets since the exact field is unconfirmed.
 /// Returns the npad (>= 0) if found, or -1 on failure.
@@ -4048,6 +4210,11 @@ unsafe fn save_css_state_for_reentry() {
         // Save secondary hash (panel+0x208) for PT sub-starter restoration.
         SAVED_CSS_SECONDARY_HASH[i].store(
             core::ptr::read_volatile(panel.add(0x208) as *const u64),
+            Ordering::Relaxed,
+        );
+        // Save CPU level (panel+0x211) for per-CPU level restoration.
+        SAVED_CSS_CPU_LEVEL[i].store(
+            core::ptr::read_volatile(panel.add(0x211) as *const u8) as u32,
             Ordering::Relaxed,
         );
     }
@@ -4159,16 +4326,21 @@ unsafe fn restore_css_panels_on_reentry() {
                 }
             }
         } else {
-            // CPU entry: write character hash + costume, then activate as CPU.
+            // CPU entry: write character hash + costume + CPU level, then activate as CPU.
             let null_hash: u64 = 0xc100000fd5f7fa78;
             if saved_hash != 0 && saved_hash != null_hash {
                 core::ptr::write_volatile(panel.add(0x200) as *mut u64, saved_hash);
                 core::ptr::write_volatile(panel.add(0x210) as *mut u8, saved_costume);
             }
+            // Restore CPU level to panel+0x211.
+            let saved_cpu_level = SAVED_CSS_CPU_LEVEL[i].load(Ordering::Relaxed) as u8;
+            if saved_cpu_level > 0 {
+                core::ptr::write_volatile(panel.add(0x211) as *mut u8, saved_cpu_level);
+            }
             if current_type != 1 {
                 debug_log(&format!(
-                    "css_restore: entry={} hash={:#018x} costume={} → CPU",
-                    i, saved_hash, saved_costume
+                    "css_restore: entry={} hash={:#018x} costume={} cpu_lv={} → CPU",
+                    i, saved_hash, saved_costume, saved_cpu_level
                 ));
                 set_panel_type(panel, 1);
             }
