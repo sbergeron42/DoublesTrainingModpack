@@ -1086,6 +1086,8 @@ pub fn training_mods() {
         doubles::lua_ai_init_hook,
         // Doubles: skip AI think pipeline for human-controlled entries
         doubles::lua_ai_orchestrator_hook,
+        // Doubles: AI agent init diagnostic — logs per-entry AI struct state
+        doubles::fighter_ai_init_hook,
         // Doubles: fix cloned character hash for entries 2/3 during CSS→training transition
         doubles::clone_write_hook,
         // Doubles: MainThread game tick — executes deferred P2 state toggle

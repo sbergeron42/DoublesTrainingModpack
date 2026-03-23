@@ -1277,6 +1277,13 @@ const OFFSET_LUA_AI_INIT: usize = 0x2c9900;
 /// Hooking here lets us skip the entire AI pipeline for human-controlled entries.
 const OFFSET_LUA_AI_ORCHESTRATOR: usize = 0x64f820;
 
+/// Offset of FUN_7100658af0 (fighter_ai_init, 13.0.4): one-shot AI agent creation.
+/// Called once per training mode load when struct+0x4150 == 0.
+/// Creates Lua AI agents, loads character scripts, sets rank.
+/// +0x28 = agent count, +0x18 = fighter_kind array, +0x4178 = agent ptr array.
+/// 13.0.1: 0x658ad0, 13.0.4: 0x658af0 (delta +0x20).
+const OFFSET_FIGHTER_AI_INIT: usize = 0x658af0;
+
 /// Offset of FUN_7101788260 (clone_write): writes ui_chara hash + fighter_kind to .bss.
 /// Training mode transition calls this 3x with the SAME config buffer (from CPU1),
 /// cloning CPU1's character to entries 1, 2, 3. Hook: for entries 2/3, replace
@@ -3675,18 +3682,16 @@ pub unsafe fn lua_ai_orchestrator_hook(ai_mgr: *mut u8) {
     let count = *(ai_mgr.add(0x28) as *const i32);
     let max = (count as usize).min(4);
 
-    // One-shot diagnostic: log agent array state to confirm entries 2/3 have agents.
-    static AI_AGENT_LOGGED: AtomicBool = AtomicBool::new(false);
-    if is_team_mode() && !AI_AGENT_LOGGED.swap(true, Ordering::Relaxed) {
-        let mut msg = format!("AI_AGENTS: count={}", count);
+    // Diagnostic: log first N orchestrator calls to see if it's per-entry or global.
+    static ORCH_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+    let log_n = ORCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if is_team_mode() && log_n < 8 {
+        let mut msg = format!("AI_ORCH[{}]: ptr=0x{:x} count={}", log_n, ai_mgr as usize, count);
         for i in 0..4 {
             let ptr = core::ptr::read_volatile(entry_base.add(i));
             if ptr != 0 {
-                let inner = *(ptr as *const usize).add(0x58 / 8); // outer+0x58 = inner
-                let rank = if inner != 0 {
-                    core::ptr::read_volatile((inner + 0xC0C) as *const i32)
-                } else { -1 };
-                msg.push_str(&format!(" [{}]=0x{:x}(rank={})", i, ptr, rank));
+                let eid = core::ptr::read_volatile((ptr + 0x6C) as *const i32);
+                msg.push_str(&format!(" [{}]=eid{}", i, eid));
             } else {
                 msg.push_str(&format!(" [{}]=NULL", i));
             }
@@ -3713,6 +3718,40 @@ pub unsafe fn lua_ai_orchestrator_hook(ai_mgr: *mut u8) {
         let (idx, val) = saved[j];
         core::ptr::write_volatile(entry_base.add(idx), val);
     }
+}
+
+/// Hook for FUN_7100658ad0 (fighter_ai_init): one-shot per-entry AI agent creation.
+/// Diagnostic: log the struct state to understand the per-entry AI init flow.
+#[skyline::hook(offset = OFFSET_FIGHTER_AI_INIT)]
+pub unsafe fn fighter_ai_init_hook(ai_data: *mut u8) {
+    let entry_id = core::ptr::read_volatile(ai_data.add(0xE0) as *const i32);
+    let count = core::ptr::read_volatile(ai_data.add(0x28) as *const i32);
+    let obj_count = core::ptr::read_volatile(ai_data.add(0x4150) as *const u64);
+    let kind0 = core::ptr::read_volatile(ai_data.add(0x18) as *const i32);
+    let kind1 = core::ptr::read_volatile(ai_data.add(0x1C) as *const i32);
+    let kind2 = core::ptr::read_volatile(ai_data.add(0x20) as *const i32);
+    let kind3 = core::ptr::read_volatile(ai_data.add(0x24) as *const i32);
+    debug_log(&format!(
+        "FIGHTER_AI_INIT: ptr=0x{:x} entry_id={} count={} obj_count={} kinds=[{},{},{},{}]",
+        ai_data as usize, entry_id, count, obj_count, kind0, kind1, kind2, kind3
+    ));
+
+    call_original!(ai_data);
+
+    // Log agent array after creation
+    let new_count = core::ptr::read_volatile(ai_data.add(0x28) as *const i32);
+    let mut msg = format!("FIGHTER_AI_INIT_POST: count={}", new_count);
+    for i in 0..4usize {
+        let agent = core::ptr::read_volatile(ai_data.add(0x4178 + i * 8) as *const usize);
+        if agent != 0 {
+            let eid = core::ptr::read_volatile((agent + 0x6C) as *const i32);
+            let fk = core::ptr::read_volatile((agent + 0x74) as *const i32);
+            msg.push_str(&format!(" [{}]=eid={},kind={}", i, eid, fk));
+        } else {
+            msg.push_str(&format!(" [{}]=NULL", i));
+        }
+    }
+    debug_log(&msg);
 }
 
 /// Hook for FUN_7101788260 (clone_write): override config fields for entries 2/3
