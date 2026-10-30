@@ -2474,6 +2474,9 @@ pub unsafe fn css_dump_chara_select_layout(root_pane: &Pane, layout_name: &str) 
 // ---------------------------------------------------------------------------
 // Loupe / Radar diagnostic dump — one-shot pane tree + anim probe
 // ---------------------------------------------------------------------------
+// Hardware 13.0.4 test35-37 completes this probe; Eden stalls in the arrow
+// material reads. Gate the reads themselves, not just their log output.
+#[cfg(feature = "doubles_ui_diagnostics")]
 pub unsafe fn loupe_radar_diagnostic_dump(root_pane: &Pane, layout_name: &str) {
     match layout_name {
         "info_loupe" => {

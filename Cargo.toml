@@ -69,3 +69,5 @@ plugin-dependencies = [
 outside_training_mode = []
 layout_arc_from_file = []
 doubles_debug_log = []
+# Opt-in pane/material probes; completes on hardware but can stall Eden.
+doubles_ui_diagnostics = ["doubles_debug_log"]

@@ -96,6 +96,7 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     // One-shot: dump the separate `chara_select` layout pane tree.
     crate::training::doubles::css_dump_chara_select_layout(root_pane, &layout_name);
     // One-shot: dump loupe/radar pane trees for off-screen indicator team color research.
+    #[cfg(feature = "doubles_ui_diagnostics")]
     crate::training::doubles::loupe_radar_diagnostic_dump(root_pane, &layout_name);
 
     if layout_name == "info_training" {

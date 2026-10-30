@@ -426,6 +426,14 @@ If you'd like to build the modpack starting from the source code, you can build 
 cargo skyline build --release
 ```
 
+Loupe/radar pane and arrow-material diagnostics are disabled by default. Opt in
+with `cargo skyline build --release --features doubles_ui_diagnostics`; this also
+enables `doubles_debug_log`. Logging alone does not enable these probes. Hardware
+13.0.4 logs `ftp-debuglog/test35.log` through `test37.log` in the parent research
+folder show the arrow probe completing; the material-read stall was reproduced
+in the research Eden instance. Keep this feature off for Eden testing until that
+difference is understood.
+
 To build the entire modpack including supporting files, use the steps in the [Github Actions specification file](https://github.com/jugeeya/UltimateTrainingModpack/blob/main/.github/workflows/rust.yml).
 
 ## Prerequisites
