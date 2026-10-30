@@ -3572,47 +3572,22 @@ pub unsafe fn lua_ai_path_hook(out: *mut u8, module_ptr: *mut u8, kind: u32, typ
 /// Check whether a fighter kind's resources are loaded (CSS-selected or derived).
 /// Returns true if the kind matches any CSS-confirmed character or P1/CPU1,
 /// including Pokemon Trainer's three sub-Pokemon kinds.
+#[path = "doubles_resource_kinds.rs"]
+mod resource_kinds;
+
 unsafe fn is_kind_resource_loaded(kind: i32) -> bool {
-    // P1 and CPU1 from FighterManager (always loaded).
+    use resource_kinds::selected_kind_includes;
     let (p1_kind, cpu1_kind) = css_kinds_from_fighter_manager();
-    if kind == p1_kind || kind == cpu1_kind {
+    if selected_kind_includes(p1_kind, kind) || selected_kind_includes(cpu1_kind, kind) {
         return true;
     }
-    // Check all CSS-confirmed kinds (P3/P4 and any others).
-    for slot_kind_atom in &CSS_CONFIRMED_KINDS {
-        let slot_kind = slot_kind_atom.load(Ordering::Relaxed);
-        if slot_kind < 0 {
-            continue;
-        }
-        if kind == slot_kind {
-            return true;
-        }
-        // Pokemon Trainer: CSS confirms kind=114 (PTRAINER), but the actual
-        // fighters are Squirtle/Ivysaur/Charizard. process_player_infos loads
-        // all three Pokemon's resources when PT is confirmed.
-        if slot_kind == *FIGHTER_KIND_PTRAINER
-            && (kind == *FIGHTER_KIND_PZENIGAME
-                || kind == *FIGHTER_KIND_PFUSHIGISOU
-                || kind == *FIGHTER_KIND_PLIZARDON)
-        {
+    for slot_kind in &CSS_CONFIRMED_KINDS {
+        if selected_kind_includes(slot_kind.load(Ordering::Relaxed), kind) {
             return true;
         }
     }
-    // Also check clone_write-derived kinds (for entries 2/3 where css_confirm
-    // may have returned wrong data, e.g. Pokemon Trainer).
-    for cw_kind_atom in &CLONE_WRITE_KINDS {
-        let cw_kind = cw_kind_atom.load(Ordering::Relaxed);
-        if cw_kind < 0 {
-            continue;
-        }
-        if kind == cw_kind {
-            return true;
-        }
-        // If clone_write derived PZENIGAME from a PT selection, also allow
-        // the other two Pokemon kinds (Ivysaur, Charizard).
-        if cw_kind == *FIGHTER_KIND_PZENIGAME
-            && (kind == *FIGHTER_KIND_PFUSHIGISOU || kind == *FIGHTER_KIND_PLIZARDON)
-        {
+    for clone_kind in &CLONE_WRITE_KINDS {
+        if selected_kind_includes(clone_kind.load(Ordering::Relaxed), kind) {
             return true;
         }
     }
