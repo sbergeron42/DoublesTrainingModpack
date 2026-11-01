@@ -1538,6 +1538,14 @@ unsafe fn window_secondary_material(pane: *mut Pane) -> *mut Material {
     *((pane as *const u8).add(0x118) as *const *mut Material)
 }
 
+/// Get the Material of a Picture pane (Pane+0xD8 via as_picture), or null.
+/// Every cached-pane tint goes through this: a null material here crashed
+/// Quit Training on 13.0.5 (Data Abort at 0x49, the material's m_flag).
+unsafe fn picture_material(pane: *mut Pane) -> *mut Material {
+    if pane.is_null() { return core::ptr::null_mut(); }
+    (&mut *pane).as_picture().material
+}
+
 /// Saved original material colors for panel bg panes (for bracket restore).
 /// [panel_idx][variant_idx] matching PANEL_BG_PANES layout.
 static mut ORIG_PANEL_WHITE: [[ResColor; 3]; 4] = [[ResColor { r: 255, g: 255, b: 255, a: 255 }; 3]; 4];
@@ -2080,6 +2088,9 @@ static mut CSS_MEDAL_PANES: [*mut Pane; 8] = [core::ptr::null_mut(); 8];
 /// Cached hand (cursor) Parts pane pointers — set_hand_00..07.
 static mut CSS_HAND_PANES: [*mut Pane; 8] = [core::ptr::null_mut(); 8];
 static FLAG_CACHE_SCENE: AtomicUsize = AtomicUsize::new(0);
+/// Root pane the cache was built from. A new CSS layout can reuse the old
+/// scene's address, so the scene alone doesn't tell us the panes are current.
+static FLAG_CACHE_ROOT: AtomicUsize = AtomicUsize::new(0);
 
 /// Log immediate children of a pane (for diagnostics).
 unsafe fn dump_children(parent: *const Pane, label: &str) {
@@ -2124,6 +2135,20 @@ unsafe fn dump_pane_tree(pane: *const Pane, depth: u32, max_depth: u32) {
 /// Populate FLAG_PANE_CACHE by searching the pane tree once.
 /// Also caches the "Training" text pane and panel background panes.
 unsafe fn cache_flag_panes(root_pane: *const Pane) {
+    // Forget the previous session's panes first. The loops below `continue`
+    // when a pane isn't found, which would otherwise keep a pointer into the
+    // destroyed layout.
+    FLAG_PANE_CACHE = [
+        PanelFlagPanes::null(), PanelFlagPanes::null(),
+        PanelFlagPanes::null(), PanelFlagPanes::null(),
+    ];
+    PANEL_BG_PANES = [[core::ptr::null_mut(); 3]; 4];
+    STATUS_BAR_PANES = [core::ptr::null_mut(); 4];
+    STATUS_BAR_LEFT_PANES = [[core::ptr::null_mut(); 5]; 4];
+    NAMEPLATE_PANES = [core::ptr::null_mut(); 4];
+    SPIRIT_BTN_PANES = [core::ptr::null_mut(); 4];
+    NAMEPLATE_CONTAINER_PANES = [core::ptr::null_mut(); 4];
+
     // Search for "Training" text pane — try common CSS text pane names.
     TRAINING_TEXT_PANE = core::ptr::null_mut();
     for name in &["txt_rule_name", "txt_training", "txt_rule", "txt_mode",
@@ -2161,13 +2186,13 @@ unsafe fn cache_flag_panes(root_pane: *const Pane) {
         let variant_names = ["window_l_color_l", "window_l_color_m", "window_l_color_s"];
         for (vi, vname) in variant_names.iter().enumerate() {
             let color_win = find_pane_by_name(panel as *const Pane, vname);
-            PANEL_BG_PANES[i][vi] = color_win;
-            if !color_win.is_null() {
-                // Picture-compatible layout (material ptr at Pane+0).
-                let picture = (&mut *color_win).as_picture();
-                let material = &*picture.material;
-                ORIG_PANEL_WHITE[i][vi] = read_material_color(material, MaterialColorType::WhiteColor);
-                ORIG_PANEL_BLACK[i][vi] = read_material_color(material, MaterialColorType::BlackColor);
+            // Picture-compatible layout (material ptr at Pane+0xD8). Only
+            // cache panes that have a material, so the tints can't null-deref.
+            let material = picture_material(color_win);
+            PANEL_BG_PANES[i][vi] = if material.is_null() { core::ptr::null_mut() } else { color_win };
+            if !material.is_null() {
+                ORIG_PANEL_WHITE[i][vi] = read_material_color(&*material, MaterialColorType::WhiteColor);
+                ORIG_PANEL_BLACK[i][vi] = read_material_color(&*material, MaterialColorType::BlackColor);
             }
         }
         if i == 0 {
@@ -2184,12 +2209,11 @@ unsafe fn cache_flag_panes(root_pane: *const Pane) {
         if !btn_panel.is_null() {
             // Right side (Picture pane — material at +0xD8 via as_picture).
             let sb = find_pane_by_name(btn_panel as *const Pane, "wnd_color_r_on");
-            STATUS_BAR_PANES[i] = sb;
-            if !sb.is_null() {
-                let picture = (&mut *sb).as_picture();
-                let mat = &*picture.material;
-                ORIG_STATUS_WHITE[i] = read_material_color(mat, MaterialColorType::WhiteColor);
-                ORIG_STATUS_BLACK[i] = read_material_color(mat, MaterialColorType::BlackColor);
+            let mat = picture_material(sb);
+            STATUS_BAR_PANES[i] = if mat.is_null() { core::ptr::null_mut() } else { sb };
+            if !mat.is_null() {
+                ORIG_STATUS_WHITE[i] = read_material_color(&*mat, MaterialColorType::WhiteColor);
+                ORIG_STATUS_BLACK[i] = read_material_color(&*mat, MaterialColorType::BlackColor);
                 STATUS_COLORS_SAVED = true;
             }
             // Left side (Window panes — content material via pane+0x110 → +0x08).
@@ -2631,8 +2655,10 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
                 // Also write dark color to inner panes' material black_color.
                 for inner_name in &["arrow_l", "arrow_c", "arrow_r"] {
                     if let Some(inner) = pane.find_pane_by_name_recursive(inner_name) {
-                        let mat = &mut *inner.as_picture().material;
-                        mat.set_black_res_color(*dark_color);
+                        let mat = picture_material(inner as *mut Pane);
+                        if !mat.is_null() {
+                            (*mat).set_black_res_color(*dark_color);
+                        }
                     }
                 }
             }
@@ -2731,9 +2757,15 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
     // One-shot probe of hand/medal AnimTransform data (DISABLED — crashes on stale pane ptr).
     // css_probe_hand_medal(root_pane);
 
-    // Cache pane pointers once per CSS session.
-    if FLAG_CACHE_SCENE.load(Ordering::Relaxed) != scene {
+    // Cache pane pointers once per CSS session. css_setup_hook clears
+    // FLAG_CACHE_SCENE on every CSS entry, and the root pane check catches a
+    // new layout drawn before that (both can reuse the old addresses).
+    let root_addr = root_pane as *const Pane as usize;
+    if FLAG_CACHE_SCENE.load(Ordering::Relaxed) != scene
+        || FLAG_CACHE_ROOT.load(Ordering::Relaxed) != root_addr
+    {
         FLAG_CACHE_SCENE.store(scene, Ordering::Relaxed);
+        FLAG_CACHE_ROOT.store(root_addr, Ordering::Relaxed);
         PANEL_COLORS_SAVED = false;
         STATUS_COLORS_SAVED = false;
         cache_flag_panes(root_pane as *const Pane);
@@ -2790,12 +2822,11 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
             }
 
             // Tint the flag_color background to match the team color.
-            if !fp.flag_color.is_null() {
+            let material = picture_material(fp.flag_color);
+            if !material.is_null() {
                 let (white, black) = TEAM_FLAG_COLORS[color.min(3) as usize];
-                let picture = (&mut *fp.flag_color).as_picture();
-                let material = &mut *picture.material;
-                material.set_white_res_color(white);
-                material.set_black_res_color(black);
+                (*material).set_white_res_color(white);
+                (*material).set_black_res_color(black);
             }
 
             // Tint all panel bg variants via material colors (bracket approach).
@@ -2803,12 +2834,10 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
             // originals AFTER original!() so shared materials don't persist.
             let (white, black) = TEAM_FLAG_COLORS[color.min(3) as usize];
             for vi in 0..3 {
-                let bg = PANEL_BG_PANES[i][vi];
-                if !bg.is_null() {
-                    let picture = (&mut *bg).as_picture();
-                    let material = &mut *picture.material;
-                    material.set_white_res_color(white);
-                    material.set_black_res_color(black);
+                let material = picture_material(PANEL_BG_PANES[i][vi]);
+                if !material.is_null() {
+                    (*material).set_white_res_color(white);
+                    (*material).set_black_res_color(black);
                 }
             }
 
@@ -2820,12 +2849,10 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
             if is_human {
                 let tc = STATUS_BAR_COLORS[color.min(3) as usize];
                 // Right side (Picture pane).
-                let sb = STATUS_BAR_PANES[i];
-                if !sb.is_null() {
-                    let picture = (&mut *sb).as_picture();
-                    let material = &mut *picture.material;
-                    material.set_white_res_color(tc);
-                    material.set_black_res_color(STATUS_BAR_BLACK);
+                let material = picture_material(STATUS_BAR_PANES[i]);
+                if !material.is_null() {
+                    (*material).set_white_res_color(tc);
+                    (*material).set_black_res_color(STATUS_BAR_BLACK);
                 }
                 // Left side (Window panes — write both content (+0x110→+0x08) and secondary (+0x118) materials).
                 // [0] bg=dark, [1] stripes=normal, [2] all=dark, [3] off_bg=dark, [4] off_all=dark.
@@ -2867,23 +2894,19 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
             // Restore all panel bg variants to saved originals.
             if PANEL_COLORS_SAVED {
                 for vi in 0..3 {
-                    let bg = PANEL_BG_PANES[i][vi];
-                    if !bg.is_null() {
-                        let picture = (&mut *bg).as_picture();
-                        let material = &mut *picture.material;
-                        material.set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
-                        material.set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
+                    let material = picture_material(PANEL_BG_PANES[i][vi]);
+                    if !material.is_null() {
+                        (*material).set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
+                        (*material).set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
                     }
                 }
             }
             // Restore status bar to original colors.
             if STATUS_COLORS_SAVED {
-                let sb = STATUS_BAR_PANES[i];
-                if !sb.is_null() {
-                    let picture = (&mut *sb).as_picture();
-                    let material = &mut *picture.material;
-                    material.set_white_res_color(ORIG_STATUS_WHITE[i]);
-                    material.set_black_res_color(ORIG_STATUS_BLACK[i]);
+                let material = picture_material(STATUS_BAR_PANES[i]);
+                if !material.is_null() {
+                    (*material).set_white_res_color(ORIG_STATUS_WHITE[i]);
+                    (*material).set_black_res_color(ORIG_STATUS_BLACK[i]);
                 }
             }
         }
@@ -3083,22 +3106,18 @@ pub unsafe fn css_post_draw(layout_name: &str) {
     }
     for i in 0..4 {
         for vi in 0..3 {
-            let bg = PANEL_BG_PANES[i][vi];
-            if !bg.is_null() {
-                let picture = (&mut *bg).as_picture();
-                let material = &mut *picture.material;
-                material.set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
-                material.set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
+            let material = picture_material(PANEL_BG_PANES[i][vi]);
+            if !material.is_null() {
+                (*material).set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
+                (*material).set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
             }
         }
         // Restore status bar material after draw (bracket).
         if STATUS_COLORS_SAVED {
-            let sb = STATUS_BAR_PANES[i];
-            if !sb.is_null() {
-                let picture = (&mut *sb).as_picture();
-                let material = &mut *picture.material;
-                material.set_white_res_color(ORIG_STATUS_WHITE[i]);
-                material.set_black_res_color(ORIG_STATUS_BLACK[i]);
+            let material = picture_material(STATUS_BAR_PANES[i]);
+            if !material.is_null() {
+                (*material).set_white_res_color(ORIG_STATUS_WHITE[i]);
+                (*material).set_black_res_color(ORIG_STATUS_BLACK[i]);
             }
         }
     }
@@ -3193,6 +3212,10 @@ pub unsafe fn css_setup_hook(parent: *const u8, mode_params: *mut u8, data_buf: 
     // pane pointers from FLAG_PANE_CACHE before css_panel_layout_hook sets
     // the new address. css_panel_layout_hook will re-populate it for training.
     CSS_TRAINING_SCENE_PTR.store(0, Ordering::Relaxed);
+    // And force the draw hook to re-cache: the new scene can land at the old
+    // scene's address, which would leave FLAG_PANE_CACHE pointing into the
+    // destroyed layout.
+    FLAG_CACHE_SCENE.store(0, Ordering::Relaxed);
 
     if !mode_params.is_null() {
         let mode = core::ptr::read_volatile(mode_params.add(0x0) as *const u32);
