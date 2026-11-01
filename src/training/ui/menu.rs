@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use skyline::nn::ui2d::*;
-use smash::ui2d::{SmashPane, SmashTextBox};
+use smash::ui2d::SmashPane;
+use crate::common::text_box::SmashTextBox;
 use training_mod_tui::{
     App, AppPage, ConfirmationState, SliderState, MAX_CPU_SLOTS, NX_SUBMENU_COLUMNS,
     NX_SUBMENU_ROWS,

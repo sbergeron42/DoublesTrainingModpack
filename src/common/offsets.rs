@@ -38,12 +38,32 @@ fn find_offset(name: &str, needle: &[u8]) -> Option<usize> {
     }
 }
 
+// Game version. Fixed offsets and needles are verified against the 13.0.4 and 13.0.5 main builds
+// (static check: SSBU Reversing Agent knowledge/doubles-mod-addresses.json); any other version
+// gets the 13.0.4 values, as before.
+pub static IS_13_0_5: LazyLock<bool> =
+    LazyLock::new(|| crate::common::events::SMASH_VERSION.as_str() == "13.0.5");
+
+/// The 13.0.4 or the 13.0.5 value of a main-module offset, for the running game version.
+pub fn by_version(v13_0_4: usize, v13_0_5: usize) -> usize {
+    if *IS_13_0_5 { v13_0_5 } else { v13_0_4 }
+}
+
 macro_rules! impl_offset {
     ($fn_name:ident) => {
         paste::paste! {
             pub static [<OFFSET_ $fn_name>]: LazyLock<usize> = LazyLock::new(|| find_offset(stringify!($fn_name), [<NEEDLE_ $fn_name>]).expect(stringify!(Failed to find offset for $fn_name)));
         }
-    }
+    };
+    // For a function whose needle changed in 13.0.5 (an adrp or bl target moved): NEEDLE_X_13_0_5 there
+    ($fn_name:ident, by_version) => {
+        paste::paste! {
+            pub static [<OFFSET_ $fn_name>]: LazyLock<usize> = LazyLock::new(|| {
+                let needle = if *IS_13_0_5 { [<NEEDLE_ $fn_name _13_0_5>] } else { [<NEEDLE_ $fn_name>] };
+                find_offset(stringify!($fn_name), needle).expect(stringify!(Failed to find offset for $fn_name))
+            });
+        }
+    };
 }
 
 // To add a new offset, you need to define a NEEDLE_ static first with the
@@ -66,7 +86,18 @@ static NEEDLE_GET_BATTLE_OBJECT_FROM_ID: &[u8] = &[
     0x08, 0x01, 0x09, 0x8b,
     0x00, 0x01, 0x1f, 0xd6,
 ];
-impl_offset!(GET_BATTLE_OBJECT_FROM_ID);
+// 13.0.5: same offset; the adrp at +0xc targets the moved jump table
+static NEEDLE_GET_BATTLE_OBJECT_FROM_ID_13_0_5: &[u8] = &[
+    0x08, 0x7c, 0x1c, 0x53,
+    0x1f, 0x11, 0x00, 0x71,
+    0x68, 0x07, 0x00, 0x54,
+    0x69, 0x08, 0x02, 0x90,
+    0x29, 0xd1, 0x07, 0x91,
+    0x28, 0x79, 0xa8, 0xb8,
+    0x08, 0x01, 0x09, 0x8b,
+    0x00, 0x01, 0x1f, 0xd6,
+];
+impl_offset!(GET_BATTLE_OBJECT_FROM_ID, by_version);
 
 // OFFSET_COPY_SETUP = 0xba0e80
 static NEEDLE_COPY_SETUP: &[u8] = &[
@@ -198,7 +229,14 @@ static NEEDLE_STALE_MENU: &[u8] = &[
     0x00, 0x1d, 0xa8, 0x4e,
     0xc0, 0xa2, 0x06, 0x91,
 ];
-impl_offset!(STALE_MENU);
+// 13.0.5: same offset; the bl at +0x4 targets the moved callee
+static NEEDLE_STALE_MENU_13_0_5: &[u8] = &[
+    0xdf, 0x82, 0x2d, 0x39,
+    0x17, 0x46, 0x8e, 0x94,
+    0x00, 0x1d, 0xa8, 0x4e,
+    0xc0, 0xa2, 0x06, 0x91,
+];
+impl_offset!(STALE_MENU, by_version);
 
 // IMPORTANT! See above comment for STALE_MENU
 // OFFSET_STALE = 0x13e88c4
@@ -208,7 +246,14 @@ static NEEDLE_STALE: &[u8] = &[
     0xc0, 0xa2, 0x06, 0x91,
     0xdf, 0x22, 0x2f, 0x39,
 ];
-impl_offset!(STALE);
+// 13.0.5: same offset; the bl here targets the moved callee
+static NEEDLE_STALE_13_0_5: &[u8] = &[
+    0x17, 0x46, 0x8e, 0x94,
+    0x00, 0x1d, 0xa8, 0x4e,
+    0xc0, 0xa2, 0x06, 0x91,
+    0xdf, 0x22, 0x2f, 0x39,
+];
+impl_offset!(STALE, by_version);
 
 // todo!(Can we remove this and replace with SoundModule::play_se()?)
 // OFFSET_PLAY_SE = 0x4cf6c0
@@ -350,4 +395,15 @@ static NEEDLE_TRAINING_RESET_CHECK: &[u8] = &[
     0x3f, 0x05, 0x00, 0x71,
     0x2b, 0x0a, 0x00, 0x54,
 ];
-impl_offset!(TRAINING_RESET_CHECK);
+// 13.0.5: same offset; the adrp at +0x8 targets the moved global
+static NEEDLE_TRAINING_RESET_CHECK_13_0_5: &[u8] = &[
+    0x1f, 0x09, 0x00, 0x71,
+    0x41, 0x1c, 0x00, 0x54,
+    0x08, 0xfa, 0x01, 0xb0,
+    0x08, 0x7d, 0x42, 0xf9,
+    0x08, 0x01, 0x40, 0xf9,
+    0x09, 0xa1, 0x40, 0xb9,
+    0x3f, 0x05, 0x00, 0x71,
+    0x2b, 0x0a, 0x00, 0x54,
+];
+impl_offset!(TRAINING_RESET_CHECK, by_version);

@@ -1,5 +1,5 @@
 use skyline::nn::ui2d::*;
-use smash::ui2d::SmashTextBox;
+use crate::common::text_box::SmashTextBox;
 
 use crate::common::menu::QUICK_MENU_ACTIVE;
 use crate::common::TRAINING_MENU_ADDR;

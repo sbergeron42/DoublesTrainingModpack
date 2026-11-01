@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsiz
 use skyline::nn::ui2d::{AnimTransform, AnimTransformNode, Layout, Material, MaterialFlags, MaterialColorType, Pane, ResColor};
 use smash::app::{self, lua_bind::*, BattleObjectModuleAccessor};
 use smash::lib::lua_const::*;
-use smash::ui2d::{SmashPane, SmashTextBox};
+use smash::ui2d::SmashPane;
 use training_mod_sync::*;
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ const HID_DPAD_RIGHT: u64 = 1 << 14;
 const HID_DPAD_DOWN: u64 = 1 << 15;
 
 use crate::common::{FIGHTER_MANAGER_ADDR, MENU};
+use crate::common::offsets::by_version;
 use training_mod_consts::OnOff;
 
 // ---------------------------------------------------------------------------
@@ -38,12 +39,14 @@ use training_mod_consts::OnOff;
 /// BSS offset: global controller pointer table (10 entries, 8 bytes each).
 /// The FIM dispatch loop reads controller ptrs from this table using the slot
 /// index stored at input_mgr + 0x298 + player_idx * 4.
-const CONTROLLER_TABLE_BSS: usize = 0x5338860;
+/// 13.0.4: 0x5338860, 13.0.5: 0x5339860 (all .bss globals sit 0x1000 higher in 13.0.5).
+static CONTROLLER_TABLE_BSS: LazyLock<usize> = LazyLock::new(|| by_version(0x5338860, 0x5339860));
 
 /// BSS offset: controller system flag struct. The byte at +8 controls whether
 /// the FIM dispatch loop uses per-slot controller lookup (nonzero) or a single
 /// default controller for all entries (zero).
-const CONTROLLER_FLAG_BSS: usize = 0x53388b0;
+/// 13.0.4: 0x53388b0, 13.0.5: 0x53398b0.
+static CONTROLLER_FLAG_BSS: LazyLock<usize> = LazyLock::new(|| by_version(0x53388b0, 0x53398b0));
 
 /// Cached pointer to the input manager struct (computed from FIM mappings arg - 0x18).
 /// Used by inject_human_input to read native FIM output from the output array.
@@ -73,14 +76,14 @@ pub unsafe fn setup_native_fim_for_humans(
 ) {
     use skyline::hooks::{getRegionAddress, Region};
     let text_base = getRegionAddress(Region::Text) as usize;
-    let ctrl_table = (text_base + CONTROLLER_TABLE_BSS) as *const usize;
+    let ctrl_table = (text_base + *CONTROLLER_TABLE_BSS) as *const usize;
 
     static SETUP_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     // Ensure the per-controller lookup flag is enabled (byte at flag_struct + 8).
     // When this is 0, the dispatch loop uses a single default controller for all
     // entries instead of looking up per-slot — we need per-slot mode.
-    let flag_ptr = (text_base + CONTROLLER_FLAG_BSS + 8) as *mut u8;
+    let flag_ptr = (text_base + *CONTROLLER_FLAG_BSS + 8) as *mut u8;
     if core::ptr::read_volatile(flag_ptr) == 0 {
         core::ptr::write_volatile(flag_ptr, 1);
         debug_log("NATIVE_FIM_SETUP: enabled per-controller flag");
@@ -725,7 +728,7 @@ pub fn get_entry_tag(entry_id: i32) -> u32 {
 /// Read the ControllerMapping from the game's profile memory for a given tag index.
 ///
 /// Pointer chain from disassembly of clone_write (13.0.4, offset 0x178845c):
-///   p0 = *(text + 0x5313510)       // global ptr
+///   p0 = *(text + 0x5313510)       // global ptr (13.0.5: 0x5314510)
 ///   p1 = *p0                       // profile manager object
 ///   flag = *(u8*)p1                // must be 0
 ///   p2 = *(p1 + 0x58)             // inner ptr
@@ -738,7 +741,7 @@ pub fn get_entry_tag(entry_id: i32) -> u32 {
 pub unsafe fn get_profile_mapping(tag: u32) -> Option<ControllerMapping> {
     use skyline::hooks::{getRegionAddress, Region};
     let text_base = getRegionAddress(Region::Text) as usize;
-    let dat_addr = text_base + 0x5313510;
+    let dat_addr = text_base + by_version(0x5313510, 0x5314510);
     let p0 = *(dat_addr as *const usize);
 
     // One-shot diagnostic: log every pointer in the chain
@@ -1265,7 +1268,8 @@ const OFFSET_LOAD_FIGHTER_VIA_CSS: usize = 0x66ded0;
 /// Offset of FUN_71017e88d0: builds a resource path string for a given fighter
 /// kind and resource type. Called with type_id=0x13 immediately before
 /// FUN_71002c9900 (Lua AI init) for each fighter entry in FUN_710064f820.
-const OFFSET_LUA_AI_PATH_BUILDER: usize = 0x17e88d0;
+/// 13.0.5: 0x17e8890 (same code, moved -0x40).
+static OFFSET_LUA_AI_PATH_BUILDER: LazyLock<usize> = LazyLock::new(|| by_version(0x17e88d0, 0x17e8890));
 
 /// Offset of FUN_71002c9900: Lua AI agent init (~9 900 LOC switch on fighter_kind).
 /// Crashes with PC=0 when the override character's NSS isn't loaded because
@@ -1288,7 +1292,8 @@ const OFFSET_FIGHTER_AI_INIT: usize = 0x658af0;
 /// Training mode transition calls this 3x with the SAME config buffer (from CPU1),
 /// cloning CPU1's character to entries 1, 2, 3. Hook: for entries 2/3, replace
 /// config[0x88] with the correct hash read from CSS panel objects.
-const OFFSET_CLONE_WRITE: usize = 0x1788260;
+/// 13.0.5: 0x17880c0 (same code except PC-relative targets).
+static OFFSET_CLONE_WRITE: LazyLock<usize> = LazyLock::new(|| by_version(0x1788260, 0x17880c0));
 
 /// Offset of set_panel_type ($main + 0x1A028B0).
 /// Signature: fn(panel: *mut u8, panel_type: i32)
@@ -1318,12 +1323,14 @@ const OFFSET_STATE_TOGGLE: usize = 0x1A1DBF0;
 /// Called during CSS panel init. team_color = -1 for no team, 0-3 for team color.
 /// When team_color != -1: applies "team_color_%d" animation (team_color+1).
 /// Also checks per-medal type field at +0x14 (stride 0x130): 1 = team medal appearance.
-const OFFSET_CSS_MEDAL_COLOR: usize = 0x32D0280;
+/// 13.0.5: 0x32D0830 (same code, moved +0x5b0).
+static OFFSET_CSS_MEDAL_COLOR: LazyLock<usize> = LazyLock::new(|| by_version(0x32D0280, 0x32D0830));
 
 /// Offset of FUN_71032d28cc: CSS hand (cursor) color setup.
 /// Signature: fn(hand_struct: *mut u8, player_idx: u32, player_type: u32, team_color: i32)
 /// When team_color != -1: applies "team_color_%d" animation (team_color+1).
-const OFFSET_CSS_HAND_COLOR: usize = 0x32D28CC;
+/// 13.0.5: 0x32D2E7C (same code except PC-relative targets).
+static OFFSET_CSS_HAND_COLOR: LazyLock<usize> = LazyLock::new(|| by_version(0x32D28CC, 0x32D2E7C));
 
 /// Offset of FUN_71002c5cf0: main game update tick, runs per-frame on MainThread.
 /// Signature: fn(param_1: *mut u8). Hooked to execute deferred state toggles
@@ -1350,15 +1357,18 @@ const OFFSET_BTN_RULE_HANDLER: usize = 0x1db1910;
 
 /// Offset of resolve_ui_chara_hash_to_kind (FUN_7103262130): resolves a ui_chara
 /// hash to fighter_kind via binary search. Returns kind (i32) or -1/0x77 on failure.
-const OFFSET_RESOLVE_HASH_TO_KIND: usize = 0x3262130;
+/// 13.0.5: 0x32626e0 (the function changed; all 40 checked callers call it there).
+static OFFSET_RESOLVE_HASH_TO_KIND: LazyLock<usize> = LazyLock::new(|| by_version(0x3262130, 0x32626e0));
 
 /// Offset of check_char_availability (FUN_7103262710): returns character availability
 /// state: 0=available, 1=locked(base), 2=DLC not purchased, 3=DLC available, 4=unknown.
-const OFFSET_CHECK_CHAR_AVAILABILITY: usize = 0x3262710;
+/// 13.0.5: 0x3262cc0 (the function changed; all 7 callers call it there).
+static OFFSET_CHECK_CHAR_AVAILABILITY: LazyLock<usize> = LazyLock::new(|| by_version(0x3262710, 0x3262cc0));
 
 /// BSS root for the game's resource/character database manager.
 /// DAT_710532e730 → *(+8) → inner; *(inner+0x168) = hash DB struct pointer.
-const CHAR_DB_ROOT_BSS: usize = 0x532e730;
+/// 13.0.5: 0x532f730 (the callers of check_char_availability load it there).
+static CHAR_DB_ROOT_BSS: LazyLock<usize> = LazyLock::new(|| by_version(0x532e730, 0x532f730));
 
 /// Team mode flag — persists across training resets, toggled at CSS.
 /// true = Team Battle, false = Solo Battle (default).
@@ -1366,7 +1376,8 @@ static TEAM_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Address of the vanilla team battle flag byte in .bss.
 /// DAT_71052c41e8 — read by app::global_parameter::is_team_battle().
-const TEAM_BATTLE_FLAG_BSS: usize = 0x52c41e8;
+/// 13.0.5: 0x52c51e8.
+static TEAM_BATTLE_FLAG_BSS: LazyLock<usize> = LazyLock::new(|| by_version(0x52c41e8, 0x52c51e8));
 
 /// Diagnostic: periodic state_toggle timer for P2. Non-zero = active, counts frames.
 static P2_TOGGLE_TIMER: AtomicU32 = AtomicU32::new(0);
@@ -1390,7 +1401,7 @@ pub unsafe fn sync_team_battle_flag() {
     let text_base = skyline::hooks::getRegionAddress(
         skyline::hooks::Region::Text,
     ) as usize;
-    let flag_ptr = (text_base + TEAM_BATTLE_FLAG_BSS) as *mut u8;
+    let flag_ptr = (text_base + *TEAM_BATTLE_FLAG_BSS) as *mut u8;
     let desired = if TEAM_MODE.load(Ordering::Relaxed) {
         1u8
     } else {
@@ -1888,7 +1899,7 @@ unsafe fn get_hash_db() -> usize {
     let text_base = skyline::hooks::getRegionAddress(
         skyline::hooks::Region::Text,
     ) as usize;
-    let root = core::ptr::read_volatile((text_base + CHAR_DB_ROOT_BSS) as *const usize);
+    let root = core::ptr::read_volatile((text_base + *CHAR_DB_ROOT_BSS) as *const usize);
     if root == 0 { return 0; }
     let inner = core::ptr::read_volatile((root + 8) as *const usize);
     if inner == 0 { return 0; }
@@ -1905,7 +1916,7 @@ unsafe fn check_char_availability(hash: u64) -> i32 {
         skyline::hooks::Region::Text,
     ) as usize;
     type CheckFn = unsafe extern "C" fn(usize, u64) -> i64;
-    let check: CheckFn = core::mem::transmute(text_base + OFFSET_CHECK_CHAR_AVAILABILITY);
+    let check: CheckFn = core::mem::transmute(text_base + *OFFSET_CHECK_CHAR_AVAILABILITY);
     check(hash_db, hash) as i32
 }
 
@@ -2680,10 +2691,10 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
         ) as usize;
         // FUN_7103779cd0: format number text (pane, fmt_str, arg_count, value)
         type FmtNumFn = unsafe extern "C" fn(*mut u8, *const u8, i32, i32);
-        let fmt_num: FmtNumFn = core::mem::transmute(text_base + 0x3779cd0);
+        let fmt_num: FmtNumFn = core::mem::transmute(text_base + by_version(0x3779cd0, 0x377a280));
         // FUN_7103777e80: format string text (pane, fmt_str, value)
         type FmtStrFn = unsafe extern "C" fn(*mut u8, *const u8, i32);
-        let fmt_str: FmtStrFn = core::mem::transmute(text_base + 0x3777e80);
+        let fmt_str: FmtStrFn = core::mem::transmute(text_base + by_version(0x3777e80, 0x3778430));
 
         for i in 1..saved_count.min(4) {
             let saved_level = SAVED_CSS_CPU_LEVEL[i].load(Ordering::Relaxed) as u8;
@@ -2949,7 +2960,7 @@ static DEFERRED_COLOR_REFRESH: AtomicU32 = AtomicU32::new(0);
 /// it passes team_color=-1 (no team). We override with TEAM_COLORS[medal_idx]
 /// when team mode is active. Does NOT change the medal type field — keeps
 /// the default medal appearance (player number text like "P3", "CPU").
-#[skyline::hook(offset = OFFSET_CSS_MEDAL_COLOR)]
+#[skyline::hook(offset = *OFFSET_CSS_MEDAL_COLOR)]
 pub unsafe fn css_medal_color_hook(
     medal_mgr: *mut u8,
     medal_idx: u32,
@@ -2976,7 +2987,7 @@ pub unsafe fn css_medal_color_hook(
 }
 
 /// Hook the CSS hand (cursor) color setup function to inject team colors.
-#[skyline::hook(offset = OFFSET_CSS_HAND_COLOR)]
+#[skyline::hook(offset = *OFFSET_CSS_HAND_COLOR)]
 pub unsafe fn css_hand_color_hook(
     hand_struct: *mut u8,
     player_idx: u32,
@@ -3025,8 +3036,8 @@ pub unsafe fn refresh_medal_hand_colors() {
     type MedalFn = unsafe extern "C" fn(*mut u8, u32, u32, u32, i32, u32);
     type HandFn = unsafe extern "C" fn(*mut u8, u32, u32, i32);
     let text_base = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as usize;
-    let medal_fn: MedalFn = std::mem::transmute(text_base + OFFSET_CSS_MEDAL_COLOR);
-    let hand_fn: HandFn = std::mem::transmute(text_base + OFFSET_CSS_HAND_COLOR);
+    let medal_fn: MedalFn = std::mem::transmute(text_base + *OFFSET_CSS_MEDAL_COLOR);
+    let hand_fn: HandFn = std::mem::transmute(text_base + *OFFSET_CSS_HAND_COLOR);
 
     for i in 0..4u32 {
         if mask & (1 << i) == 0 {
@@ -3558,7 +3569,7 @@ pub unsafe fn load_fighter_via_css_hook(css_list_head: usize, sel: *const u8) {
 /// NOTE: TRAINING_MENU_ADDR is null during training mode load (set only by stale_handle,
 /// which fires later). Use FIGHTER_MANAGER_ADDR instead — it is set at mod startup via
 /// LookupSymbol and P1/CPU1 FighterEntries are initialized before FUN_710064f820 runs.
-#[skyline::hook(offset = OFFSET_LUA_AI_PATH_BUILDER)]
+#[skyline::hook(offset = *OFFSET_LUA_AI_PATH_BUILDER)]
 pub unsafe fn lua_ai_path_hook(out: *mut u8, module_ptr: *mut u8, kind: u32, type_id: u32) {
     if type_id == 0x13 {
         if !is_kind_resource_loaded(kind as i32) {
@@ -3743,7 +3754,7 @@ pub unsafe fn fighter_ai_init_hook(ai_data: *mut u8) {
 ///   - config[0x7C] (npad/controller)— hardware npad for human, -1 for CPU
 ///
 /// Panel access: scene+0x250 is a std::vector of (vtable, panel_ptr) pairs (0x10 each).
-#[skyline::hook(offset = OFFSET_CLONE_WRITE)]
+#[skyline::hook(offset = *OFFSET_CLONE_WRITE)]
 pub unsafe fn clone_write_hook(config: *mut u8, entry_index: u32, byte_flag: u8, bss_out: *mut u8) {
     // Only apply training-specific overrides when transitioning from the
     // training CSS. In other modes (Smash, etc.) just call through.

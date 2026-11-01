@@ -20,6 +20,7 @@ pub mod menu;
 pub mod offsets;
 pub mod raygun_printer;
 pub mod release;
+pub mod text_box;
 
 pub static FIGHTER_MANAGER_ADDR: RwLock<usize> = RwLock::new(0);
 pub static ITEM_MANAGER_ADDR: RwLock<usize> = RwLock::new(0);

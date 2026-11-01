@@ -3,7 +3,8 @@
 use byte_unit::MEBIBYTE;
 use sarc::SarcFile;
 use skyline::nn::ui2d::*;
-use smash::ui2d::{SmashPane, SmashTextBox};
+use smash::ui2d::SmashPane;
+use crate::common::text_box::SmashTextBox;
 use training_mod_consts::{OnOff, MENU};
 
 use crate::common::menu::QUICK_MENU_ACTIVE;
