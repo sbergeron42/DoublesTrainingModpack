@@ -520,9 +520,11 @@ unsafe fn lra_handle(ctx: &mut InlineCtx) {
 unsafe fn stale_handle(ctx: &mut InlineCtx) {
     TRAINING_MENU_ADDR = ctx.registers[22].x() as *mut PauseMenu;
     (*TRAINING_MENU_ADDR).stale_move_toggle = 1;
-    // Default "No. of CPUs" to 3 (=4 fighters) only in team mode; solo keeps vanilla default (1 CPU).
+    // Default "No. of CPUs" in team mode to the CSS slots in use (P4 None = 2 CPUs, 3 fighters);
+    // solo keeps the vanilla default (1 CPU).
     if crate::training::doubles::is_team_mode() {
-        *((TRAINING_MENU_ADDR as *mut u8).add(0xb40) as *mut u32) = 3;
+        *((TRAINING_MENU_ADDR as *mut u8).add(0xb40) as *mut u32) =
+            crate::training::doubles::team_mode_cpu_count();
     }
 }
 

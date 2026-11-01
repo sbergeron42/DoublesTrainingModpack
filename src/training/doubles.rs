@@ -4239,6 +4239,26 @@ unsafe fn save_css_state_for_reentry() {
     debug_log(&format!("save_css_state: {} slots saved", count));
 }
 
+/// "No. of CPUs" for the training menu in team mode, from the CSS slots saved at
+/// the training transition: the highest of P2..P4 whose panel is in use
+/// (panel+0x1F8: 0 = human, 1 = CPU; 2/3 = disabled, i.e. "None"). P2 always
+/// counts. Entries are positional, so P3 None with P4 in use still gives 3 and
+/// P3 is then a clone of P2. Without saved CSS state, keeps the old default of 3.
+pub fn team_mode_cpu_count() -> u32 {
+    let saved = SAVED_CSS_SLOT_COUNT.load(Ordering::Relaxed).min(4);
+    if saved < 2 {
+        return 3;
+    }
+    let mut count = 1u32;
+    for i in 2..saved {
+        let panel_type = SAVED_CSS_IS_CPU[i].load(Ordering::Relaxed);
+        if panel_type == 0 || panel_type == 1 {
+            count = i as u32;
+        }
+    }
+    count
+}
+
 /// Second BSS array stride (used by inline hook for pre-writing NpadId).
 const BSS_CSS_SECOND_STRIDE: usize = 0x240;
 
