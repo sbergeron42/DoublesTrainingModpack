@@ -1,4 +1,5 @@
 #![allow(clippy::mut_from_ref)]
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 #[cfg(feature = "layout_arc_from_file")]
 use byte_unit::MEBIBYTE;
 use sarc::SarcFile;
@@ -8,8 +9,8 @@ use crate::common::text_box::SmashTextBox;
 use training_mod_consts::{OnOff, MENU};
 
 use crate::common::menu::QUICK_MENU_ACTIVE;
-use crate::common::offsets::{OFFSET_DRAW, OFFSET_LAYOUT_ARC_MALLOC};
-use crate::common::{is_ready_go, is_training_mode};
+use crate::common::offsets::{OFFSET_DRAW, OFFSET_LAYOUT_ANIMATE, OFFSET_LAYOUT_ARC_MALLOC};
+use crate::common::{is_ready_go, is_training_mode, is_training_mode_raw};
 #[cfg(feature = "layout_arc_from_file")]
 use crate::consts::LAYOUT_ARC_PATH;
 use crate::training::frame_counter;
@@ -135,6 +136,80 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     crate::training::doubles::css_post_draw(layout_name);
 }
 
+/// The game's own Training menu (the one + opens) has 116 option buttons, part layouts named
+/// `info_training_btn0_*`, and the game animates them every frame whether the menu is open or closed: about
+/// 1.1 ms per frame of the UI work the main thread waits on (SSBU Reversing Agent docs/FRAME_PROFILER.md, "The
+/// game's UI work"). While the menu is fully closed they aren't animated; they carry on from where they were
+/// when it opens.
+///
+/// info_training animates its own transforms, which include the menu's open and close animation, before its
+/// part layouts, so the test sees this frame's menu position.
+static INFO_TRAINING_ROOT: AtomicUsize = AtomicUsize::new(0);
+/// For the info_training animate in progress: 0 not tested yet, 1 menu fully closed, 2 open or moving.
+static TRAINING_MENU_STATE: AtomicU8 = AtomicU8::new(0);
+
+/// The help footer pane of the info_training layout whose root is HELP_ROOT, found once per layout instance.
+static HELP_ROOT: AtomicUsize = AtomicUsize::new(0);
+static HELP_PANE: AtomicUsize = AtomicUsize::new(0);
+const HELP_NAME: &[u8] = b"L_staying_help\0";
+
+unsafe fn help_pane(root: *const Pane) -> *const Pane {
+    let pane = HELP_PANE.load(Ordering::Relaxed) as *const Pane;
+    if HELP_ROOT.load(Ordering::Relaxed) == root as usize
+        && !pane.is_null()
+        && (*pane).name[..HELP_NAME.len()].iter().zip(HELP_NAME).all(|(a, b)| *a as u8 == *b)
+    {
+        return pane;
+    }
+    let pane = (*root).find_pane_by_name_recursive("L_staying_help").map_or(core::ptr::null(), |p| p as *const Pane);
+    HELP_ROOT.store(root as usize, Ordering::Relaxed);
+    HELP_PANE.store(pane as usize, Ordering::Relaxed);
+    pane
+}
+
+/// The help footer sits at y = -80 while the menu is closed and moves up as it opens (info_training_in_menu).
+unsafe fn training_menu_closed(root: *const Pane) -> bool {
+    match TRAINING_MENU_STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let help = help_pane(root);
+            let closed = !help.is_null() && (*help).pos_y == -80.0;
+            TRAINING_MENU_STATE.store(if closed { 1 } else { 2 }, Ordering::Relaxed);
+            closed
+        }
+    }
+}
+
+#[skyline::hook(offset = *OFFSET_LAYOUT_ANIMATE)]
+pub unsafe fn handle_layout_animate(layout: *mut Layout, step: f32) {
+    if !is_training_mode_raw() {
+        return original!()(layout, step);
+    }
+    let name = core::ffi::CStr::from_ptr((*layout).layout_name as *const _).to_bytes();
+    if name == b"info_training" {
+        // info_training also has a part layout of the same name: only the outermost one sets and clears this.
+        let outer = INFO_TRAINING_ROOT
+            .compare_exchange(0, (*layout).root_pane as usize, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
+        if outer {
+            TRAINING_MENU_STATE.store(0, Ordering::Relaxed);
+        }
+        original!()(layout, step);
+        if outer {
+            INFO_TRAINING_ROOT.store(0, Ordering::Relaxed);
+        }
+        return;
+    }
+    if name.starts_with(b"info_training_btn0_") {
+        let root = INFO_TRAINING_ROOT.load(Ordering::Relaxed) as *const Pane;
+        if !root.is_null() && training_menu_closed(root) {
+            return;
+        }
+    }
+    original!()(layout, step)
+}
+
 // Allocate a static amount of memory that Smash isn't allowed to deallocate,
 // in order for us to be able to swap the 'layout.arc' with the current
 // version of the file in between loads of training mode.
@@ -245,5 +320,5 @@ impl PaneExt for Pane {
 }
 
 pub fn init() {
-    skyline::install_hooks!(handle_draw, handle_layout_arc_malloc);
+    skyline::install_hooks!(handle_draw, handle_layout_animate, handle_layout_arc_malloc);
 }
