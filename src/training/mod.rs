@@ -114,6 +114,7 @@ pub unsafe fn handle_get_command_flag_cat(
         // because otherwise it won't reset the shield_damage_mul
         // back to "normal" once you leave training mode.
         shield::param_installer();
+        doubles::hold_catchup_off_in_training();
     }
 
     if !is_training_mode() {

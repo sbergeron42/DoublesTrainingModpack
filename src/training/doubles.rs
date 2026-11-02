@@ -3123,6 +3123,28 @@ pub unsafe fn css_post_draw(layout_name: &str) {
     }
 }
 
+/// main_loop runs a "catch-up" sim tick after a slow frame (two game frames in one displayed frame, a
+/// visible jump) only while this byte is nonzero. Scene setup code sets it per scene: 1 in Training, 0 at
+/// the main menu. It is read only by main_loop's two catch-up checks (13.0.4 0x374c640/0x374c754, 13.0.5
+/// 0x374cbf0/0x374cd04). Holding it at 0 in Training shows every game frame; a slow frame becomes a brief
+/// hold instead. Measured on the Switch: SSBU Reversing Agent docs/FRAME_TIMER.md, "Catch-up off".
+const OFFSET_CATCHUP_ENABLE_13_0_4: usize = 0x593a448;
+const OFFSET_CATCHUP_ENABLE_13_0_5: usize = 0x593b448;
+
+/// Keeps catch-up ticks off while a Training match runs. Called from the command-flag hook, i.e. inside the
+/// sim tick and before main_loop's catch-up check for the same frame (game_tick_hook doesn't run during
+/// matches). Outside matches nothing calls it, and the next scene's setup writes its own value.
+pub unsafe fn hold_catchup_off_in_training() {
+    if !crate::common::is_training_mode_raw() {
+        return;
+    }
+    let text_base = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as usize;
+    let byte = (text_base + by_version(OFFSET_CATCHUP_ENABLE_13_0_4, OFFSET_CATCHUP_ENABLE_13_0_5)) as *mut u8;
+    if core::ptr::read_volatile(byte) != 0 {
+        core::ptr::write_volatile(byte, 0);
+    }
+}
+
 /// Hook the main game update tick to execute deferred state toggles on MainThread.
 /// state_toggle_handler crashes from TaskWorker (draw hook) because set_panel_type
 /// accesses thread-local state. This hook runs on MainThread every frame.
