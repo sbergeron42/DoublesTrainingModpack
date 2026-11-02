@@ -14,7 +14,7 @@ use crate::common::menu::{
 };
 use crate::input::*;
 use crate::training::frame_counter;
-use crate::training::ui::PaneExt;
+use crate::training::ui::{pane_cache, PaneExt};
 use training_mod_consts::TOGGLE_MAX;
 use training_mod_sync::*;
 
@@ -521,13 +521,10 @@ pub unsafe fn draw(root_pane: &Pane) {
     // in info_training_in_menu.bflan
     assign(
         &VANILLA_MENU_ACTIVE,
-        root_pane
-            .find_pane_by_name_recursive_expect("L_staying_help")
-            .pos_y
-            != -80.0,
+        pane_cache::find_expect(root_pane, "L_staying_help").pos_y != -80.0,
     );
 
-    let overall_parent_pane = root_pane.find_pane_by_name_recursive_expect("TrModMenu");
+    let overall_parent_pane = pane_cache::find_expect(root_pane, "TrModMenu");
     overall_parent_pane.set_visible(read(&QUICK_MENU_ACTIVE) && !read(&VANILLA_MENU_ACTIVE));
     let menu_close_wait_frame = frame_counter::get_frame_count(*MENU_CLOSE_FRAME_COUNTER);
     fade_out(

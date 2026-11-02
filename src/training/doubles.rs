@@ -2307,7 +2307,7 @@ pub unsafe fn melee_portrait_team_colors(root_pane: &Pane) {
         let color = TEAM_COLORS[i].load(Ordering::Relaxed);
         let target_frame = 9.0 + color as f32;
 
-        if let Some(parent) = root_pane.find_pane_by_name_recursive(player_name) {
+        if let Some(parent) = crate::training::ui::pane_cache::find(root_pane, *player_name) {
             let layout = &mut *parent.as_parts().layout;
             let anim_root = &mut layout.anim_trans_list as *mut AnimTransformNode;
 
@@ -2341,7 +2341,7 @@ pub unsafe fn playercursor_team_colors(root_pane: &Pane) {
         .iter()
         .enumerate()
     {
-        if let Some(cursor_pane) = root_pane.find_pane_by_name_recursive(cursor_name) {
+        if let Some(cursor_pane) = crate::training::ui::pane_cache::find(root_pane, *cursor_name) {
             // set_cursor_p* are Parts panes; read layout pointer at +0xE8
             let layout_ptr = *((cursor_pane as *const Pane as usize + 0xE8) as *const *mut Layout);
             if layout_ptr.is_null() {
@@ -2600,12 +2600,13 @@ pub unsafe fn loupe_radar_diagnostic_dump(root_pane: &Pane, layout_name: &str) {
 /// Known issue: Green team (frame 12) shows as dark blue for trio arrows.
 pub unsafe fn loupe_team_colors(root_pane: &Pane) {
     // Loupe bubbles: set_parts_loupe_p1 through p4 (1-indexed).
+    const LOUPE_NAMES: [&str; 4] =
+        ["set_parts_loupe_p1", "set_parts_loupe_p2", "set_parts_loupe_p3", "set_parts_loupe_p4"];
     for i in 0..4usize {
         let color = TEAM_COLORS[i].load(Ordering::Relaxed);
         let target_frame = 10.0 + color as f32;
 
-        let name = format!("set_parts_loupe_p{}", i + 1);
-        if let Some(pane) = root_pane.find_pane_by_name_recursive(&name) {
+        if let Some(pane) = crate::training::ui::pane_cache::find(root_pane, LOUPE_NAMES[i]) {
             let layout_ptr = *((pane as *const Pane as usize + 0xE8) as *const *mut Layout);
             if layout_ptr.is_null() { continue; }
             let layout = &mut *layout_ptr;
@@ -2632,14 +2633,18 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
         ResColor { r: 4, g: 255, b: 4, a: 0 },      // Green
         ResColor { r: 255, g: 255, b: 4, a: 0 },    // Yellow
     ];
+    // set_parts_arrow_{l,r}_00 through _03 (0-indexed).
+    const ARROW_NAMES: [[&str; 4]; 2] = [
+        ["set_parts_arrow_l_00", "set_parts_arrow_l_01", "set_parts_arrow_l_02", "set_parts_arrow_l_03"],
+        ["set_parts_arrow_r_00", "set_parts_arrow_r_01", "set_parts_arrow_r_02", "set_parts_arrow_r_03"],
+    ];
     for i in 0..4usize {
         let color = TEAM_COLORS[i].load(Ordering::Relaxed).min(3) as usize;
         let target_frame = ARROW_COLOR_FRAME[color];
         let dark_color = &ARROW_DARK_COLOR[color];
 
-        for prefix in &["set_parts_arrow_l_", "set_parts_arrow_r_"] {
-            let name = format!("{}{:02}", prefix, i);
-            if let Some(pane) = root_pane.find_pane_by_name_recursive(&name) {
+        for side in &ARROW_NAMES {
+            if let Some(pane) = crate::training::ui::pane_cache::find(root_pane, side[i]) {
                 let layout_ptr = *((pane as *const Pane as usize + 0xE8) as *const *mut Layout);
                 if layout_ptr.is_null() { continue; }
                 let layout = &mut *layout_ptr;
@@ -2654,7 +2659,7 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
 
                 // Also write dark color to inner panes' material black_color.
                 for inner_name in &["arrow_l", "arrow_c", "arrow_r"] {
-                    if let Some(inner) = pane.find_pane_by_name_recursive(inner_name) {
+                    if let Some(inner) = crate::training::ui::pane_cache::find(pane, *inner_name) {
                         let mat = picture_material(inner as *mut Pane);
                         if !mat.is_null() {
                             (*mat).set_black_res_color(*dark_color);
@@ -2672,13 +2677,14 @@ pub unsafe fn loupe_team_colors(root_pane: &Pane) {
 /// `set_parts_marker_01`–`08` (1-indexed) each have anim[0] controlling color.
 /// Vanilla: P1=frame 9, P2+=frame 10 (cloned default). Base appears to be 9.
 pub unsafe fn radar_marker_team_colors(root_pane: &Pane) {
+    const MARKER_NAMES: [&str; 4] =
+        ["set_parts_marker_01", "set_parts_marker_02", "set_parts_marker_03", "set_parts_marker_04"];
     for i in 0..4usize {
         let color = TEAM_COLORS[i].load(Ordering::Relaxed);
         // Radar markers use base 9 (from probe: P1=9=red, P2=10=blue).
         let target_frame = 9.0 + color as f32;
 
-        let name = format!("set_parts_marker_{:02}", i + 1);
-        if let Some(pane) = root_pane.find_pane_by_name_recursive(&name) {
+        if let Some(pane) = crate::training::ui::pane_cache::find(root_pane, MARKER_NAMES[i]) {
             let layout_ptr = *((pane as *const Pane as usize + 0xE8) as *const *mut Layout);
             if layout_ptr.is_null() { continue; }
             let layout = &mut *layout_ptr;

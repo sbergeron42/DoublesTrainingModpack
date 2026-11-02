@@ -19,6 +19,7 @@ mod damage;
 mod display;
 pub mod menu;
 pub mod notifications;
+pub mod pane_cache;
 
 pub unsafe fn set_icon_text(pane: &mut TextBox, icons: &[u16]) {
     pane.set_text_string("");
@@ -56,8 +57,12 @@ pub fn fade_out(pane: &mut Pane, current_frame: u32, total_frames: u32) {
 
 #[skyline::hook(offset = *OFFSET_DRAW)]
 pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) {
-    let layout_name = skyline::from_c_str((*layout).layout_name);
+    // Borrowed, not copied: this runs for every layout every frame.
+    let layout_name = core::ffi::CStr::from_ptr((*layout).layout_name as *const _)
+        .to_str()
+        .unwrap_or("");
     let root_pane = &mut *(*layout).root_pane;
+    pane_cache::set_active(is_training_mode() && is_ready_go());
 
     // Set HUD to invisible if HUD is toggled off (team mode only)
     if crate::training::doubles::is_team_mode()
@@ -70,14 +75,14 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
             "info_radar_a",
             "info_radar_b",
         ]
-        .contains(&layout_name.as_str())
+        .contains(&layout_name)
     {
         // InfluencedAlpha means "Should my children panes' alpha be influenced by mine, as the parent?"
         root_pane.flags |= 1 << PaneFlag::InfluencedAlpha as u8;
         root_pane.set_visible(read(&MENU).hud == OnOff::ON && !read(&QUICK_MENU_ACTIVE));
     }
 
-    damage::draw(root_pane, &layout_name);
+    damage::draw(root_pane, layout_name);
     if crate::training::doubles::is_team_mode()
         && is_training_mode()
         && is_ready_go()
@@ -92,13 +97,13 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
             crate::training::doubles::radar_marker_team_colors(root_pane);
         }
     }
-    crate::training::doubles::css_btn_rule_draw(root_pane, &layout_name);
-    crate::training::doubles::css_layout_name_logger(&layout_name);
+    crate::training::doubles::css_btn_rule_draw(root_pane, layout_name);
+    crate::training::doubles::css_layout_name_logger(layout_name);
     // One-shot: dump the separate `chara_select` layout pane tree.
-    crate::training::doubles::css_dump_chara_select_layout(root_pane, &layout_name);
+    crate::training::doubles::css_dump_chara_select_layout(root_pane, layout_name);
     // One-shot: dump loupe/radar pane trees for off-screen indicator team color research.
     #[cfg(feature = "doubles_ui_diagnostics")]
-    crate::training::doubles::loupe_radar_diagnostic_dump(root_pane, &layout_name);
+    crate::training::doubles::loupe_radar_diagnostic_dump(root_pane, layout_name);
 
     if layout_name == "info_training" {
         frame_counter::tick_real();
@@ -108,10 +113,10 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
         } else {
             // Solo mode: actively hide modpack UI panes so they don't show
             // stale/glitched content from a previous team mode session.
-            if let Some(menu_pane) = root_pane.find_pane_by_name_recursive("TrModMenu") {
+            if let Some(menu_pane) = pane_cache::find(root_pane, "TrModMenu") {
                 menu_pane.set_visible(false);
             }
-            if let Some(display_pane) = root_pane.find_pane_by_name_recursive("TrModDisplay") {
+            if let Some(display_pane) = pane_cache::find(root_pane, "TrModDisplay") {
                 display_pane.set_visible(false);
             }
         }
@@ -119,7 +124,7 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
         // Hide the input log container — the input_log feature was removed
         // but the pane still exists in layout.arc. Must be set every frame
         // because the layout engine resets visibility during draw.
-        if let Some(log_pane) = root_pane.find_pane_by_name_recursive("TrModInputLog") {
+        if let Some(log_pane) = pane_cache::find(root_pane, "TrModInputLog") {
             log_pane.set_visible(false);
         }
     }
@@ -127,7 +132,7 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     original!()(layout, draw_info, cmd_buffer);
 
     // Bracket restore: undo team color tinting on shared materials after draw.
-    crate::training::doubles::css_post_draw(&layout_name);
+    crate::training::doubles::css_post_draw(layout_name);
 }
 
 // Allocate a static amount of memory that Smash isn't allowed to deallocate,

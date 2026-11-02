@@ -4,14 +4,11 @@ use crate::common::text_box::SmashTextBox;
 use crate::common::menu::QUICK_MENU_ACTIVE;
 use crate::common::TRAINING_MENU_ADDR;
 use crate::training::ui::notifications::*;
-use crate::training::ui::PaneExt;
+use crate::training::ui::{pane_cache, PaneExt};
 use training_mod_sync::*;
 
-macro_rules! display_parent_fmt {
-    ($x:ident) => {
-        format!("TrModDisp{}", $x).as_str()
-    };
-}
+/// The notification box, looked up every frame (`notification_idx` is always 0).
+const DISPLAY_PARENT: &str = "TrModDisp0";
 
 macro_rules! display_header_fmt {
     ($x:ident) => {
@@ -38,8 +35,7 @@ pub unsafe fn draw(root_pane: &Pane) {
 
     let notification = (*queue_lock).first_mut();
 
-    root_pane
-        .find_pane_by_name_recursive_expect(display_parent_fmt!(notification_idx))
+    pane_cache::find_expect(root_pane, DISPLAY_PARENT)
         .set_visible(notification.is_some() && !read(&QUICK_MENU_ACTIVE));
 
     if notification.is_none() {

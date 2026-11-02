@@ -1,8 +1,8 @@
 use skyline::nn::ui2d::*;
-use smash::ui2d::SmashPane;
 
 use crate::common::{get_player_dmg_digits, is_ready_go, is_training_mode};
 use crate::consts::FighterId;
+use crate::training::ui::pane_cache;
 
 pub unsafe fn iterate_anim_list(
     anim_transform_node: &mut AnimTransformNode,
@@ -79,8 +79,7 @@ pub unsafe fn draw(root_pane: &Pane, layout_name: &str) {
     // Update percentage display as soon as possible on death
     if is_training_mode() && is_ready_go() && layout_name == "info_melee" {
         for player_name in &["p1", "p2", "p3", "p4"] {
-            if let Some(parent) = root_pane.find_pane_by_name_recursive(player_name) {
-                let _p1_layout_name = skyline::from_c_str((*parent.as_parts().layout).layout_name);
+            if let Some(parent) = pane_cache::find(root_pane, *player_name) {
                 let anim_list = &mut (*parent.as_parts().layout).anim_trans_list;
 
                 let mut has_altered_anim_list = false;
@@ -110,7 +109,7 @@ pub unsafe fn draw(root_pane: &Pane, layout_name: &str) {
                     "dig_0_anim",
                     "set_dmg_p",
                 ] {
-                    if let Some(dmg_num) = parent.find_pane_by_name_recursive(dmg_num_s) {
+                    if let Some(dmg_num) = pane_cache::find(parent, *dmg_num_s) {
                         if (dmg_num_s.contains('3') && hundreds == 0)
                             || (dmg_num_s.contains('2') && hundreds == 0 && tens == 0)
                         {
@@ -144,9 +143,7 @@ pub unsafe fn draw(root_pane: &Pane, layout_name: &str) {
                     "set_fxui_dead3",
                     "set_fxui_fire",
                 ] {
-                    if let Some(death_explosion) =
-                        parent.find_pane_by_name_recursive(death_explosion_s)
-                    {
+                    if let Some(death_explosion) = pane_cache::find(parent, *death_explosion_s) {
                         death_explosion.alpha = 0;
                         death_explosion.global_alpha = 0;
                     }
