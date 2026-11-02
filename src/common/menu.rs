@@ -126,7 +126,7 @@ pub fn load_from_file() {
     app.serialized_default_profile_settings =
         serde_json::to_string(&default_profile).expect("Could not serialize default profile");
     // Load cpu_profile_assign from MENU
-    app.cpu_profile_assign = read(&MENU).cpu_profile_assign;
+    app.cpu_profile_assign = read_with(&MENU, |m| m.cpu_profile_assign);
 }
 
 pub fn set_menu_from_json(message: &str) {
@@ -193,7 +193,7 @@ pub fn spawn_menu() {
     let mut app = lock_write(&QUICK_MENU_APP);
     app.page = AppPage::CPU_SETUP;
     app.editing_profile_idx = None;
-    app.cpu_profile_assign = read(&MENU).cpu_profile_assign;
+    app.cpu_profile_assign = read_with(&MENU, |m| m.cpu_profile_assign);
 
     // Detect which entries are CPUs vs human/nonexistent
     unsafe {

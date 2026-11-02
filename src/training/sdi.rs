@@ -26,7 +26,7 @@ static DIRECTION: [RwLock<Direction>; NUM_ENTRIES] = [
 pub fn roll_direction() {
     let ei = eidx();
     COUNTER[ei].store(0, Ordering::Relaxed);
-    assign(&DIRECTION[ei], current_profile().sdi_state.get_random());
+    assign(&DIRECTION[ei], current_profile_with(|p| p.sdi_state).get_random());
 }
 
 unsafe fn get_sdi_direction() -> Option<f64> {
@@ -51,7 +51,7 @@ pub unsafe fn check_hit_stop_delay_command(
         return original!()(module_accessor, sdi_direction);
     }
     crate::training::set_current_entry_id(module_accessor);
-    let repeat = current_profile().sdi_strength.into_u32();
+    let repeat = current_profile_with(|p| p.sdi_strength).into_u32();
     let ei = eidx();
     let counter_val = (COUNTER[ei].load(Ordering::Relaxed) + 1) % repeat;
     COUNTER[ei].store(counter_val, Ordering::Relaxed);

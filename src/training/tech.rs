@@ -83,7 +83,7 @@ unsafe fn mod_handle_change_status(
         .try_get_int()
         .unwrap_or(*FIGHTER_STATUS_KIND_WAIT as u64) as i32;
 
-    let state: TechFlags = current_profile().tech_state.get_random();
+    let state: TechFlags = current_profile_with(|p| p.tech_state).get_random();
 
     if handle_grnd_tech(module_accessor, status_kind, unk, status_kind_int, state) {
         return;
@@ -247,7 +247,7 @@ unsafe fn handle_ceil_tech(
 }
 
 pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAccessor) {
-    if !is_operation_cpu(module_accessor) || current_profile().tech_state == TechFlags::empty() {
+    if !is_operation_cpu(module_accessor) || current_profile_with(|p| p.tech_state) == TechFlags::empty() {
         return;
     }
 
@@ -261,7 +261,7 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
     .contains(&status)
     {
         // Mistech
-        requested_status = match current_profile().miss_tech_state.get_random() {
+        requested_status = match current_profile_with(|p| p.miss_tech_state).get_random() {
             MissTechFlags::GETUP => *FIGHTER_STATUS_KIND_DOWN_STAND,
             MissTechFlags::ATTACK => *FIGHTER_STATUS_KIND_DOWN_STAND_ATTACK,
             MissTechFlags::ROLL_F => {
@@ -280,7 +280,7 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
         if frame_counter::should_delay(lockout_time, FRAME_COUNTERS[ei]) {
             return;
         };
-        requested_status = match current_profile().miss_tech_state.get_random() {
+        requested_status = match current_profile_with(|p| p.miss_tech_state).get_random() {
             MissTechFlags::GETUP => *FIGHTER_STATUS_KIND_DOWN_STAND,
             MissTechFlags::ATTACK => *FIGHTER_STATUS_KIND_DOWN_STAND_ATTACK,
             MissTechFlags::ROLL_F => {
@@ -295,7 +295,7 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut BattleObjectModuleAcces
         };
     } else if status == *FIGHTER_STATUS_KIND_SLIP_WAIT {
         // Handle slips (like Diddy banana)
-        requested_status = match current_profile().miss_tech_state.get_random() {
+        requested_status = match current_profile_with(|p| p.miss_tech_state).get_random() {
             MissTechFlags::GETUP => *FIGHTER_STATUS_KIND_SLIP_STAND,
             MissTechFlags::ATTACK => *FIGHTER_STATUS_KIND_SLIP_STAND_ATTACK,
             MissTechFlags::ROLL_F => *FIGHTER_STATUS_KIND_SLIP_STAND_F,
@@ -330,7 +330,7 @@ pub unsafe fn change_motion(
         return None;
     }
 
-    if current_profile().tech_state == TechFlags::empty() {
+    if current_profile_with(|p| p.tech_state) == TechFlags::empty() {
         return None;
     }
 
@@ -383,7 +383,7 @@ unsafe fn get_snake_laydown_lockout_time(module_accessor: &mut BattleObjectModul
 }
 
 pub unsafe fn hide_tech() {
-    if !is_training_mode() || current_profile().tech_hide == OnOff::OFF {
+    if !is_training_mode() || current_profile_with(|p| p.tech_hide) == OnOff::OFF {
         return;
     }
     let ei = eidx();
@@ -450,7 +450,7 @@ pub unsafe fn handle_fighter_req_quake_pos(
         return original!()(module_accessor, quake_kind);
     }
     let status = StatusModule::status_kind(module_accessor);
-    if status == FIGHTER_STATUS_KIND_DOWN && current_profile().tech_hide == OnOff::ON {
+    if status == FIGHTER_STATUS_KIND_DOWN && current_profile_with(|p| p.tech_hide) == OnOff::ON {
         // We're hiding techs, prevent mistech quake from giving away missed tech
         return original!()(module_accessor, *CAMERA_QUAKE_KIND_NONE);
     }
@@ -493,7 +493,7 @@ pub struct CameraManager {
 
 unsafe fn set_fixed_camera_values() {
     let camera_manager = get_camera_manager();
-    if current_profile().tech_hide == OnOff::OFF {
+    if current_profile_with(|p| p.tech_hide) == OnOff::OFF {
         // Use Stage's Default Values for fixed Camera
         camera_manager.fixed_camera_center = read(&DEFAULT_FIXED_CAM_CENTER);
     } else {

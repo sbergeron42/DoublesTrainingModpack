@@ -134,7 +134,7 @@ pub unsafe fn generate_hitbox_effects(
 }
 
 pub unsafe fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
-    if read(&MENU).hitbox_vis == OnOff::OFF {
+    if read_with(&MENU, |m| m.hitbox_vis) == OnOff::OFF {
         return;
     }
 
@@ -193,8 +193,8 @@ pub unsafe fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModule
 #[skyline::hook(replace = sv_animcmd::ATTACK)]
 unsafe fn handle_attack(lua_state: u64) {
     if is_training_mode() {
-        let dominated = current_profile().shield_state != Shield::INFINITE
-            && read(&MENU).hitbox_vis != OnOff::ON;
+        let dominated = current_profile_with(|p| p.shield_state) != Shield::INFINITE
+            && read_with(&MENU, |m| m.hitbox_vis) != OnOff::ON;
         if !dominated {
             mod_handle_attack(lua_state);
         }
@@ -207,7 +207,7 @@ unsafe fn mod_handle_attack(lua_state: u64) {
     let mut l2c_agent = L2CAgent::new(lua_state);
 
     // Force no shield damage on all hitboxes for infinite shield.
-    if current_profile().shield_state == Shield::INFINITE {
+    if current_profile_with(|p| p.shield_state) == Shield::INFINITE {
         let mut hitbox_params: Vec<L2CValue> =
             (0..36).map(|i| l2c_agent.pop_lua_stack(i + 1)).collect();
         l2c_agent.clear_lua_stack();
@@ -221,7 +221,7 @@ unsafe fn mod_handle_attack(lua_state: u64) {
     }
 
     // Hitbox Visualization
-    if read(&MENU).hitbox_vis == OnOff::ON {
+    if read_with(&MENU, |m| m.hitbox_vis) == OnOff::ON {
         // get all necessary grabbox params
         let id = l2c_agent.pop_lua_stack(1); // int
         let joint = l2c_agent.pop_lua_stack(3); // hash40
@@ -268,7 +268,7 @@ unsafe fn mod_handle_attack(lua_state: u64) {
 
 #[skyline::hook(replace = sv_animcmd::CATCH)]
 unsafe fn handle_catch(lua_state: u64) {
-    if is_training_mode() && read(&MENU).hitbox_vis == OnOff::ON {
+    if is_training_mode() && read_with(&MENU, |m| m.hitbox_vis) == OnOff::ON {
         mod_handle_catch(lua_state);
     }
 

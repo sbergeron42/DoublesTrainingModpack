@@ -176,10 +176,10 @@ unsafe fn get_combo_keys(combo: ButtonCombo) -> ButtonConfig {
     match combo {
         // For OpenMenu, have a default in addition to accepting start press
         ButtonCombo::OpenMenu => DEFAULT_OPEN_MENU_CONFIG,
-        ButtonCombo::SaveState => read(&MENU).save_state_save,
-        ButtonCombo::LoadState => read(&MENU).save_state_load,
-        ButtonCombo::InputRecord => read(&MENU).input_record,
-        ButtonCombo::InputPlayback => read(&MENU).input_playback,
+        ButtonCombo::SaveState => read_with(&MENU, |m| m.save_state_save),
+        ButtonCombo::LoadState => read_with(&MENU, |m| m.save_state_load),
+        ButtonCombo::InputRecord => read_with(&MENU, |m| m.input_record),
+        ButtonCombo::InputPlayback => read_with(&MENU, |m| m.input_playback),
     }
 }
 
@@ -315,7 +315,7 @@ pub fn handle_final_input_mapping(player_idx: i32, controller_struct: &mut SomeC
     let p1_controller = &mut *controller_struct.controller;
     let mut start_menu_request = false;
 
-    if read(&MENU).menu_open_start_press == OnOff::ON {
+    if read_with(&MENU, |m| m.menu_open_start_press) == OnOff::ON {
         start_menu_request = handle_menu_open_start_press(p1_controller);
     }
 

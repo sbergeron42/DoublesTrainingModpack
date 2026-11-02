@@ -17,7 +17,7 @@ static ATTACK_ANGLE_DIRECTION: [RwLock<AttackAngle>; NUM_ENTRIES] = [
 pub fn roll_direction() {
     assign(
         &ATTACK_ANGLE_DIRECTION[eidx()],
-        current_profile().attack_angle.get_random(),
+        current_profile_with(|p| p.attack_angle).get_random(),
     );
 }
 

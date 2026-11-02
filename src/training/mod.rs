@@ -1,7 +1,7 @@
 use std::ptr::addr_of_mut;
 
 use crate::common::button_config;
-use crate::common::consts::{BuffOption, FighterId, MENU, CURRENT_CPU_ENTRY_ID, current_profile, refresh_current_profile};
+use crate::common::consts::{BuffOption, FighterId, MENU, CURRENT_CPU_ENTRY_ID, current_profile_with, refresh_current_profile};
 use crate::common::offsets::*;
 use crate::common::{
     dev_config, is_fighter, is_operation_cpu, is_training_mode, menu, refresh_is_training_mode,
@@ -175,7 +175,7 @@ fn once_per_frame_per_fighter(module_accessor: &mut BattleObjectModuleAccessor, 
         if is_operation_cpu(module_accessor) {
             WorkModule::set_flag(
                 module_accessor,
-                !(current_profile().stale_dodges.as_bool()),
+                !(current_profile_with(|p| p.stale_dodges).as_bool()),
                 *FIGHTER_INSTANCE_WORK_ID_FLAG_DISABLE_ESCAPE_PENALTY,
             );
             input_record::handle_recording();
@@ -510,7 +510,7 @@ pub unsafe fn handle_add_damage(
 // This function already checks for training mode, so we don't need to check for training mode here
 #[skyline::hook(offset = *OFFSET_TRAINING_RESET_CHECK, inline)]
 unsafe fn lra_handle(ctx: &mut InlineCtx) {
-    if !(read(&MENU).lra_reset.as_bool()) {
+    if !(read_with(&MENU, |m| m.lra_reset).as_bool()) {
         ctx.registers[8].set_x(0);
     }
 }
@@ -851,7 +851,7 @@ pub unsafe fn handle_reused_ui(
             .iter()
             .filter_map(|id| try_get_module_accessor(*id))
             .any(|ma| utility::get_kind(&mut *ma) == *FIGHTER_KIND_LITTLEMAC);
-        if has_littlemac && current_profile().buff_state.contains(&BuffOption::KO) {
+        if has_littlemac && current_profile_with(|p| p.buff_state).contains(&BuffOption::KO) {
             param_2 = 100;
         }
     }

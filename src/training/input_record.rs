@@ -151,17 +151,17 @@ unsafe fn should_mash_playback() {
 
     if is_in_hitstun(&mut *cpu_module_accessor) {
         // if we're in hitstun and want to enter the frame we start hitstop for SDI, start if we're in any damage status instantly
-        if read(&MENU).hitstun_playback == HitstunPlayback::INSTANT {
+        if read_with(&MENU, |m| m.hitstun_playback) == HitstunPlayback::INSTANT {
             should_playback = true;
         }
         // if we want to wait until we exit hitstop and begin flying away for shield art etc, start if we're not in hitstop
-        if read(&MENU).hitstun_playback == HitstunPlayback::HITSTOP
+        if read_with(&MENU, |m| m.hitstun_playback) == HitstunPlayback::HITSTOP
             && !StopModule::is_stop(cpu_module_accessor)
         {
             should_playback = true;
         }
         // if we're in hitstun and want to wait till FAF to act, then we want to match our starting status to the correct transition term to see if we can hitstun cancel
-        if read(&MENU).hitstun_playback == HitstunPlayback::HITSTUN
+        if read_with(&MENU, |m| m.hitstun_playback) == HitstunPlayback::HITSTUN
             && can_transition(cpu_module_accessor)
         {
             should_playback = true;
@@ -241,14 +241,14 @@ unsafe fn handle_recording_for_fighter(module_accessor: &mut BattleObjectModuleA
     let fighter_is_nana = fighter_kind == *FIGHTER_KIND_NANA;
 
     CURRENT_RECORD_SLOT.store(
-        read(&MENU).recording_slot.into_idx().unwrap_or(0),
+        read_with(&MENU, |m| m.recording_slot).into_idx().unwrap_or(0),
         AtomicOrdering::Relaxed,
     );
 
     if entry_id_int == 0 && !fighter_is_nana {
         if button_config::combo_passes(button_config::ButtonCombo::InputPlayback) {
-            playback(read(&MENU).playback_button_slots.get_random().into_idx());
-        } else if read(&MENU).record_trigger.contains(&RecordTrigger::COMMAND)
+            playback(read_with(&MENU, |m| m.playback_button_slots).get_random().into_idx());
+        } else if read_with(&MENU, |m| m.record_trigger).contains(&RecordTrigger::COMMAND)
             && button_config::combo_passes(button_config::ButtonCombo::InputRecord)
         {
             lockout_record();
@@ -270,7 +270,7 @@ unsafe fn handle_recording_for_fighter(module_accessor: &mut BattleObjectModuleA
             // If we need to crop the recording for neutral input
             // INPUT_RECORD_FRAME must be > 0 to prevent bounding errors
             if input_record == Record
-                && read(&MENU).recording_crop == OnOff::ON
+                && read_with(&MENU, |m| m.recording_crop) == OnOff::ON
                 && irf > 0
             {
                 while irf > 0 && is_input_neutral(irf - 1) {
@@ -285,7 +285,7 @@ unsafe fn handle_recording_for_fighter(module_accessor: &mut BattleObjectModuleA
 
             irf = 0;
 
-            if read(&MENU).playback_loop == OnOff::ON && input_record == Playback {
+            if read_with(&MENU, |m| m.playback_loop) == OnOff::ON && input_record == Playback {
                 let playback_slot = CURRENT_PLAYBACK_SLOT.load(AtomicOrdering::Relaxed);
                 playback(Some(playback_slot));
             } else {
@@ -382,7 +382,7 @@ unsafe fn handle_recording_for_fighter(module_accessor: &mut BattleObjectModuleA
 pub unsafe fn lockout_record() {
     let cpu_module_accessor = try_get_module_accessor(FighterId::CPU)
         .expect("Could not get CPU module accessor in lockout_record");
-    let recording_duration = read(&MENU).recording_duration.into_frames();
+    let recording_duration = read_with(&MENU, |m| m.recording_duration).into_frames();
     let current_record_slot = CURRENT_RECORD_SLOT.load(AtomicOrdering::Relaxed);
     let mut p1_final_mapping = lock_write(&P1_FINAL_MAPPING);
     (*p1_final_mapping)[current_record_slot] = [{ MappedInputs::empty() }; FINAL_RECORD_MAX];

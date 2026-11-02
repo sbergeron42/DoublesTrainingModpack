@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsiz
 use skyline::nn::ui2d::{AnimTransform, AnimTransformNode, Layout, Material, MaterialFlags, MaterialColorType, Pane, ResColor};
 use smash::app::{self, lua_bind::*, BattleObjectModuleAccessor};
 use smash::lib::lua_const::*;
+#[cfg(feature = "doubles_ui_diagnostics")]
 use smash::ui2d::SmashPane;
 use training_mod_sync::*;
 
@@ -1387,7 +1388,7 @@ pub fn is_team_mode() -> bool {
 }
 
 fn team_outlines_enabled() -> bool {
-    read(&MENU).team_outlines == OnOff::ON
+    read_with(&MENU, |m| m.team_outlines) == OnOff::ON
 }
 
 /// Keep vanilla is_team_battle() in sync with our TEAM_MODE flag.

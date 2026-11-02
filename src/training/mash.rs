@@ -101,7 +101,7 @@ pub fn buffer_action(action: Action) {
     }
 
     unsafe {
-        if current_profile().playback_mash == OnOff::ON
+        if current_profile_with(|p| p.playback_mash) == OnOff::ON
             && input_record::is_playback()
             && !input_record::is_recording()
             && !input_record::is_standby()
@@ -125,7 +125,7 @@ pub fn buffer_action(action: Action) {
 }
 
 pub fn buffer_follow_up() {
-    let action = current_profile().follow_up.get_random();
+    let action = current_profile_with(|p| p.follow_up).get_random();
 
     if action == Action::empty() {
         return;
@@ -319,7 +319,7 @@ fn buffer_menu_mash(action: Action) {
     full_hop::roll_full_hop();
     fast_fall::roll_fast_fall();
     FALLING_AERIAL[eidx()].store(
-        current_profile().falling_aerials.get_random().into_bool(),
+        current_profile_with(|p| p.falling_aerials).get_random().into_bool(),
         Ordering::Relaxed,
     );
 }
@@ -586,7 +586,7 @@ fn roll_aerial_delay(action: Action) {
     }
 
     AERIAL_DELAY[eidx()].store(
-        current_profile().aerial_delay.get_random().into_delay(),
+        current_profile_with(|p| p.aerial_delay).get_random().into_delay(),
         Ordering::Relaxed,
     );
 }

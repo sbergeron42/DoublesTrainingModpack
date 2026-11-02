@@ -35,7 +35,7 @@ fn should_fast_fall() -> bool {
 }
 
 pub fn roll_fast_fall() {
-    FAST_FALL[eidx()].store(current_profile().fast_fall.get_random().into_bool(), Ordering::Relaxed);
+    FAST_FALL[eidx()].store(current_profile_with(|p| p.fast_fall).get_random().into_bool(), Ordering::Relaxed);
 }
 
 pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
@@ -57,7 +57,7 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
             // Roll FF delay
             let ei = eidx();
             DELAY[ei].store(
-                current_profile().fast_fall_delay.get_random().into_delay(),
+                current_profile_with(|p| p.fast_fall_delay).get_random().into_delay(),
                 Ordering::Relaxed,
             );
             frame_counter::full_reset(FRAME_COUNTER_INDICES[ei]);

@@ -22,7 +22,7 @@ pub fn should_full_hop() -> bool {
 }
 
 pub fn roll_full_hop() {
-    FULL_HOP[eidx()].store(current_profile().full_hop.get_random().into_bool(), Ordering::Relaxed);
+    FULL_HOP[eidx()].store(current_profile_with(|p| p.full_hop).get_random().into_bool(), Ordering::Relaxed);
 }
 
 pub unsafe fn check_button_on(

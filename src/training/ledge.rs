@@ -52,7 +52,7 @@ fn roll_ledge_delay() {
     if LEDGE_DELAY[ei].load(Ordering::Relaxed) != NOT_SET {
         return;
     }
-    LEDGE_DELAY[ei].store(current_profile().ledge_delay.get_random().into_longdelay(), Ordering::Relaxed);
+    LEDGE_DELAY[ei].store(current_profile_with(|p| p.ledge_delay).get_random().into_longdelay(), Ordering::Relaxed);
 }
 
 fn roll_ledge_case() {
@@ -61,7 +61,7 @@ fn roll_ledge_case() {
     if *ledge_case_lock != LedgeOption::empty() {
         return;
     }
-    *ledge_case_lock = current_profile().ledge_state.get_random();
+    *ledge_case_lock = current_profile_with(|p| p.ledge_state).get_random();
 }
 
 fn get_ledge_option() -> Option<Action> {
@@ -147,7 +147,7 @@ pub unsafe fn force_option(module_accessor: &mut app::BattleObjectModuleAccessor
         // We buffer playback on frame 18 because we don't change status this frame from inputting on next frame; do we need to do one earlier for lasso?
         if should_buffer_playback
             && ledge_case.is_playback()
-            && current_profile().ledge_delay != LongDelay::empty()
+            && current_profile_with(|p| p.ledge_delay) != LongDelay::empty()
         {
             input_record::playback_ledge(ledge_case.playback_slot());
             return;
@@ -190,7 +190,7 @@ pub unsafe fn is_enable_transition_term(
 
     // Only handle ledge scenarios from menu
     if StatusModule::status_kind(_module_accessor) != *FIGHTER_STATUS_KIND_CLIFF_WAIT
-        || current_profile().ledge_state == LedgeOption::empty()
+        || current_profile_with(|p| p.ledge_state) == LedgeOption::empty()
     {
         return None;
     }
@@ -221,7 +221,7 @@ pub fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccesso
             return;
         }
 
-        if current_profile().ledge_state == LedgeOption::empty() {
+        if current_profile_with(|p| p.ledge_state) == LedgeOption::empty() {
             return;
         }
 

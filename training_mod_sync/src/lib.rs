@@ -9,6 +9,13 @@ pub fn read<T: Copy>(rwlock: &RwLock<T>) -> T {
     *rwlock.read().expect("Read lock is poisoned")
 }
 
+/// Reads part of a value inside a RwLock without copying the rest, and immediately unlocks
+///
+/// For a field of a large struct, such as `read_with(&MENU, |m| m.hud)`: `read` copies the whole struct
+pub fn read_with<T, R>(rwlock: &RwLock<T>, f: impl FnOnce(&T) -> R) -> R {
+    f(&rwlock.read().expect("Read_With lock is poisoned"))
+}
+
 /// Gets a clone of a value inside a RwLock and immediately unlocks
 ///
 /// Can be used if <T> is not Copy, such as Vec<u32>

@@ -70,7 +70,7 @@ fn roll_throw_delay() {
     let ei = eidx();
     if THROW_DELAY[ei].load(Ordering::Relaxed) == NOT_SET {
         THROW_DELAY[ei].store(
-            current_profile().throw_delay.get_random().into_meddelay(),
+            current_profile_with(|p| p.throw_delay).get_random().into_meddelay(),
             Ordering::Relaxed,
         );
     }
@@ -80,7 +80,7 @@ fn roll_pummel_delay() {
     let ei = eidx();
     if PUMMEL_DELAY[ei].load(Ordering::Relaxed) == NOT_SET {
         PUMMEL_DELAY[ei].store(
-            current_profile().pummel_delay.get_random().into_meddelay(),
+            current_profile_with(|p| p.pummel_delay).get_random().into_meddelay(),
             Ordering::Relaxed,
         );
     }
@@ -89,7 +89,7 @@ fn roll_pummel_delay() {
 fn roll_throw_case() {
     let ei = eidx();
     if read(&THROW_CASE[ei]) == ThrowOption::empty() {
-        assign(&THROW_CASE[ei], current_profile().throw_state.get_random());
+        assign(&THROW_CASE[ei], current_profile_with(|p| p.throw_state).get_random());
     }
 }
 
@@ -140,7 +140,7 @@ pub unsafe fn get_command_flag_throw_direction(
         }
 
         // If no pummel delay is selected (default), then don't pummel
-        if current_profile().pummel_delay == MedDelay::empty() {
+        if current_profile_with(|p| p.pummel_delay) == MedDelay::empty() {
             return 0;
         }
 
@@ -159,7 +159,7 @@ pub unsafe fn get_command_flag_throw_direction(
         *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_THROW_HI,
     ) {
         let cmd = read(&THROW_CASE[ei]).into_cmd().unwrap_or(0);
-        mash::external_buffer_menu_mash(current_profile().mash_state.get_random());
+        mash::external_buffer_menu_mash(current_profile_with(|p| p.mash_state).get_random());
         return cmd;
     }
 

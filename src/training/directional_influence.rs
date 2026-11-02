@@ -24,7 +24,7 @@ pub fn roll_di_case() {
     if *di_case_lock != Direction::empty() {
         return;
     }
-    *di_case_lock = current_profile().di_state.get_random();
+    *di_case_lock = current_profile_with(|p| p.di_state).get_random();
 }
 
 pub fn reset_di_case(module_accessor: &mut app::BattleObjectModuleAccessor) {
@@ -53,7 +53,7 @@ unsafe fn mod_handle_di(fighter: &L2CFighterCommon, _arg1: L2CValue) {
     let module_accessor = sv_system::battle_object_module_accessor(fighter.lua_state_agent);
     crate::training::set_current_entry_id(module_accessor);
 
-    if current_profile().di_state == Direction::empty() {
+    if current_profile_with(|p| p.di_state) == Direction::empty() {
         return;
     }
 

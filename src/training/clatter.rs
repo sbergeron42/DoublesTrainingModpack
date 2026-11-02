@@ -59,7 +59,7 @@ pub unsafe fn handle_clatter(module_accessor: &mut BattleObjectModuleAccessor) {
         // Don't do clatter inputs if we're not in clatter
         return;
     }
-    let repeat = current_profile().clatter_strength.into_u32();
+    let repeat = current_profile_with(|p| p.clatter_strength).into_u32();
 
     let ei = eidx();
     let counter_val = (COUNTER[ei].load(Ordering::Relaxed) + 1) % repeat;

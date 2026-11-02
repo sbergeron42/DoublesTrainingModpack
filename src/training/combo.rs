@@ -11,7 +11,7 @@ use crate::try_get_module_accessor;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use training_mod_consts::{current_profile, FighterId, OnOff, MENU};
+use training_mod_consts::{current_profile_with, FighterId, OnOff, MENU};
 use training_mod_sync::*;
 
 static PLAYER_WAS_ACTIONABLE: AtomicBool = AtomicBool::new(false);
@@ -38,7 +38,7 @@ unsafe fn is_actionable(module_accessor: *mut BattleObjectModuleAccessor) -> boo
 }
 
 fn update_frame_advantage(frame_advantage: i32) {
-    if read(&MENU).frame_advantage == OnOff::ON {
+    if read_with(&MENU, |m| m.frame_advantage) == OnOff::ON {
         // Prioritize notifications for Frame Advantage
         notifications::clear_all_notifications();
         notifications::color_notification(
@@ -73,7 +73,7 @@ pub unsafe fn once_per_frame(module_accessor: &mut BattleObjectModuleAccessor) {
     // Skip the CPU so we don't run twice per frame
     // Also skip if the CPU is set to mash since that interferes with the frame calculation
     let entry_id_int = WorkModule::get_int(module_accessor, *FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID);
-    if entry_id_int != (FighterId::Player as i32) || current_profile().mash_state != Action::empty() {
+    if entry_id_int != (FighterId::Player as i32) || current_profile_with(|p| p.mash_state) != Action::empty() {
         return;
     }
     let player_module_accessor = try_get_module_accessor(FighterId::Player)

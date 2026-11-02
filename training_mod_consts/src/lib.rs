@@ -361,13 +361,13 @@ static PROFILE_CACHE: [RwLock<CpuProfile>; 4] = [
 /// are populated from old MENU settings if needed.
 pub fn get_cpu_profile(entry_id: i32) -> CpuProfile {
     if entry_id < 1 || entry_id > MAX_CPU_SLOTS as i32 {
-        return read(&PROFILES)[0];
+        return read_with(&PROFILES, |p| p[0]);
     }
-    let idx = read(&MENU).cpu_profile_assign[(entry_id - 1) as usize] as usize;
+    let idx = read_with(&MENU, |m| m.cpu_profile_assign[(entry_id - 1) as usize]) as usize;
     if idx >= MAX_PROFILES {
-        return read(&PROFILES)[0];
+        return read_with(&PROFILES, |p| p[0]);
     }
-    read(&PROFILES)[idx]
+    read_with(&PROFILES, |p| p[idx])
 }
 
 /// Refresh the cached profile for the given entry ID.
@@ -388,6 +388,16 @@ pub fn current_profile() -> CpuProfile {
         return read(&PROFILE_CACHE[entry_id as usize]);
     }
     get_cpu_profile(entry_id)
+}
+
+/// Part of the current CPU's profile, such as `current_profile_with(|p| p.mash_state)`, without copying the
+/// whole profile as `current_profile()` does. The hooks read single settings many times per fighter per frame.
+pub fn current_profile_with<R>(f: impl FnOnce(&CpuProfile) -> R) -> R {
+    let entry_id = CURRENT_CPU_ENTRY_ID.load(Ordering::Relaxed);
+    if entry_id >= 0 && (entry_id as usize) < 4 {
+        return read_with(&PROFILE_CACHE[entry_id as usize], f);
+    }
+    f(&get_cpu_profile(entry_id))
 }
 
 /// Construct a CpuProfile from MENU fields (used for migration from old format).
