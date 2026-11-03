@@ -299,8 +299,8 @@ pub fn debug_log(_msg: &str) {}
 // CPU↔CPU hit-team assignment
 // ---------------------------------------------------------------------------
 
-/// Per-entry flag: true once hit-team has been applied this session.
-/// Reset by `invalidate_hit_teams()` on CSS re-entry or team mode toggle.
+/// Per-entry flag: true once the jostle team has been applied this session (hit teams are checked every
+/// frame). Reset by `invalidate_hit_teams()` on CSS re-entry or team mode toggle.
 static HIT_TEAM_APPLIED: [AtomicBool; 4] = [
     AtomicBool::new(false), AtomicBool::new(false),
     AtomicBool::new(false), AtomicBool::new(false),
@@ -350,16 +350,32 @@ pub unsafe fn set_cpu_hit_team(module_accessor: &mut BattleObjectModuleAccessor)
         sync_fi_data_cpu_flag(entry_id, team_color, is_human);
     }
 
-    // Skip if already applied — team values don't change mid-match.
+    // Hit team decides who can hit whom: fighters with the same hit team pass through each other. With Team
+    // Attack on, every fighter gets its own (entry_id), so teammates can hit each other; off, teammates share
+    // their team color's. The game's team attack rule byte doesn't do this here: the game gives each fighter
+    // object hit team = team color when it is created, and only this override changes it.
+    //
+    // Checked every frame, not once per entry: fighter objects created after the first frame (Ice Climbers'
+    // Nana, Mythra after Pyra's swap, each Pokemon Trainer Pokemon) start with the game's team-color hit team,
+    // and a once-per-entry flag left them unhittable by teammates (Nana read hit team = team color on 13.0.5
+    // hardware while Popo had its entry id).
+    let desired_hit_team = if is_team_mode() && !team_attack_enabled() && (entry_id as usize) < 4 {
+        TEAM_COLORS[entry_id as usize].load(Ordering::Relaxed) as i32
+    } else {
+        entry_id
+    };
+    if TeamModule::hit_team_no(module_accessor) as i32 != desired_hit_team {
+        TeamModule::set_hit_team(module_accessor, desired_hit_team);
+    }
+    // Also set team_no to a unique value — game checks both for some interactions.
+    if TeamModule::team_no(module_accessor) as i32 != entry_id {
+        TeamModule::set_team(module_accessor, entry_id, false);
+    }
+
+    // Jostle only once per entry (a new object keeps the game's jostle team, which only affects pushing).
     if (entry_id as usize) < 4 && HIT_TEAM_APPLIED[entry_id as usize].load(Ordering::Relaxed) {
         return;
     }
-
-    // Every fighter gets hit-team = entry_id so all 4 can hit each other.
-    TeamModule::set_hit_team(module_accessor, entry_id);
-    // Also set team_no to a unique value — game checks both for some interactions.
-    TeamModule::set_team(module_accessor, entry_id, false);
-
     // Jostle: in team mode, same-color teammates share a jostle team.
     if is_team_mode() && (entry_id as usize) < 4 {
         let team_color = TEAM_COLORS[entry_id as usize].load(Ordering::Relaxed) as i32;
@@ -1404,6 +1420,13 @@ static TEAM_MODE: AtomicBool = AtomicBool::new(false);
 /// 13.0.5: 0x52c51e8.
 static TEAM_BATTLE_FLAG_BSS: LazyLock<usize> = LazyLock::new(|| by_version(0x52c41e8, 0x52c51e8));
 
+/// Address of the vanilla team attack rule byte in .bss, 0x24 before the team battle byte. Read by
+/// app::global_parameter::is_team_battle_and_team_attack() (0x15cfdd0, both versions, the Lua binding) and
+/// copied into the match's rule data at match start (main+0x1345324). Training leaves it 0 (read on 13.0.5
+/// hardware). It doesn't decide hits here (set_cpu_hit_team's hit teams do: hits landed on teammates with it 0
+/// or 1); it is set to match the Team Attack option for the game code and scripts that ask for it.
+static TEAM_ATTACK_FLAG_BSS: LazyLock<usize> = LazyLock::new(|| by_version(0x52c41c4, 0x52c51c4));
+
 /// Diagnostic: periodic state_toggle timer for P2. Non-zero = active, counts frames.
 static P2_TOGGLE_TIMER: AtomicU32 = AtomicU32::new(0);
 
@@ -1415,24 +1438,29 @@ fn team_outlines_enabled() -> bool {
     read_with(&MENU, |m| m.team_outlines) == OnOff::ON
 }
 
+fn team_attack_enabled() -> bool {
+    read_with(&MENU, |m| m.team_attack) == OnOff::ON
+}
+
 /// Keep vanilla is_team_battle() in sync with our TEAM_MODE flag.
 /// Always set when team mode is active — the flag controls the INT_ARRAY
 /// color mapping in get_team_color(), which is needed by smoke trails,
 /// HUD elements, and all other effect systems (10+ callers).
 /// Outline *colors* are separately controlled by set_outline_team_color
 /// writing fi_data+0x2C, gated on team_outlines_enabled().
+/// Also sets the team attack rule from the Team Attack menu option: with team battle on, teammates can hit each
+/// other only when it is on (competitive doubles). Same-team footstools stay blocked by
+/// change_status_req_script_hook either way.
 /// Called once per frame from once_per_frame_per_fighter (entry 0).
 pub unsafe fn sync_team_battle_flag() {
     let text_base = skyline::hooks::getRegionAddress(
         skyline::hooks::Region::Text,
     ) as usize;
+    let team_mode = TEAM_MODE.load(Ordering::Relaxed);
     let flag_ptr = (text_base + *TEAM_BATTLE_FLAG_BSS) as *mut u8;
-    let desired = if TEAM_MODE.load(Ordering::Relaxed) {
-        1u8
-    } else {
-        0u8
-    };
-    core::ptr::write_volatile(flag_ptr, desired);
+    core::ptr::write_volatile(flag_ptr, team_mode as u8);
+    let attack_ptr = (text_base + *TEAM_ATTACK_FLAG_BSS) as *mut u8;
+    core::ptr::write_volatile(attack_ptr, (team_mode && team_attack_enabled()) as u8);
 }
 
 // ---------------------------------------------------------------------------

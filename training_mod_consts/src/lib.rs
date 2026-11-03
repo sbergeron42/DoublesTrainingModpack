@@ -98,6 +98,7 @@ pub struct TrainingModpackMenu {
     pub update_policy: UpdatePolicy,
     pub lra_reset: OnOff,
     pub team_outlines: OnOff,
+    pub team_attack: OnOff,
     #[serde(default)]
     pub cpu_profile_assign: [u8; MAX_CPU_SLOTS],
 }
@@ -223,6 +224,7 @@ pub static BASE_MENU: TrainingModpackMenu = TrainingModpackMenu {
     update_policy: UpdatePolicy::default(),
     lra_reset: OnOff::ON,
     team_outlines: OnOff::ON,
+    team_attack: OnOff::ON,
     cpu_profile_assign: [0; MAX_CPU_SLOTS],
 };
 
@@ -1040,6 +1042,13 @@ pub unsafe fn create_app<'a>() -> App<'a> {
         "Team Outlines",
         "team_outlines",
         "Show team-colored outlines on fighters in team mode.\nOutline colors match each fighter's assigned team color.",
+        ToggleSingle,
+        false,
+    ));
+    doubles_tab_submenus.push(OnOff::to_submenu(
+        "Team Attack",
+        "team_attack",
+        "Teammates can hit each other in team mode, as in competitive doubles.\nOff: attacks pass through teammates.",
         ToggleSingle,
         false,
     ));
