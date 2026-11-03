@@ -522,6 +522,7 @@ unsafe fn stale_handle(ctx: &mut InlineCtx) {
     TRAINING_MENU_ADDR = ctx.registers[22].x() as *mut PauseMenu;
     (*TRAINING_MENU_ADDR).stale_move_toggle = 1;
     crate::training::doubles::reset_cpu_behaviors();
+    crate::hitbox_visualizer::reset_effect_sleep();
     // Default "No. of CPUs" in team mode to the CSS slots in use (P4 None = 2 CPUs, 3 fighters);
     // solo keeps the vanilla default (1 CPU).
     if crate::training::doubles::is_team_mode() {

@@ -133,10 +133,25 @@ pub unsafe fn generate_hitbox_effects(
     }
 }
 
+/// Set once the visualization has put a fighter's effect scripts to sleep this Training session (cleared by
+/// `reset_effect_sleep`). While it is set and the visualization is off, every fighter's effect scripts are woken
+/// each frame, as upstream does on every frame. Without that, turning the visualization off left them asleep:
+/// no dash dust, aerial or special startup effects, only hit effects (13.0.5 hardware, 2026-11-03).
+static EFFECTS_SLEPT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// New Training session: the fighters are new, with their effect scripts awake.
+pub fn reset_effect_sleep() {
+    EFFECTS_SLEPT.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
 pub unsafe fn get_command_flag_cat(module_accessor: &mut app::BattleObjectModuleAccessor) {
     if read_with(&MENU, |m| m.hitbox_vis) == OnOff::OFF {
+        if EFFECTS_SLEPT.load(core::sync::atomic::Ordering::Relaxed) {
+            MotionAnimcmdModule::set_sleep_effect(module_accessor, false);
+        }
         return;
     }
+    EFFECTS_SLEPT.store(true, core::sync::atomic::Ordering::Relaxed);
 
     let status_kind = StatusModule::status_kind(module_accessor);
     if (*FIGHTER_STATUS_KIND_CATCH..=*FIGHTER_STATUS_KIND_CATCH_TURN).contains(&status_kind)
