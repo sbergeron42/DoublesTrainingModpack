@@ -372,17 +372,41 @@ pub unsafe fn get_fighter_distance() -> f32 {
     get_fighter_distance_for_entry(FighterId::CPU)
 }
 
-/// Get the distance from P1 to the CPU currently being processed.
+/// The distance the CPU currently being processed uses for the mash distance triggers: in team mode, to its nearest
+/// fighter on another team; otherwise to P1. UTM always measured to P1, so in doubles a CPU next to P2 or an
+/// opposing CPU never counted as close.
 pub unsafe fn get_fighter_distance_current_cpu() -> f32 {
     let entry_id = CURRENT_CPU_ENTRY_ID.load(core::sync::atomic::Ordering::Relaxed);
-    let fighter_id = match entry_id {
-        0 => FighterId::Player,
-        1 => FighterId::CPU,
-        2 => FighterId::CPU2,
-        3 => FighterId::CPU3,
-        _ => FighterId::CPU,
+    let ids = [FighterId::Player, FighterId::CPU, FighterId::CPU2, FighterId::CPU3];
+    let fighter_id = *ids.get(entry_id as usize).unwrap_or(&FighterId::CPU);
+    if !crate::training::doubles::is_team_mode() {
+        return get_fighter_distance_for_entry(fighter_id);
+    }
+    let cpu_module_accessor = match try_get_module_accessor(fighter_id) {
+        Some(acc) => acc,
+        None => return f32::MAX,
     };
-    get_fighter_distance_for_entry(fighter_id)
+    let cpu_pos = *PostureModule::pos(cpu_module_accessor);
+    let mut nearest = f32::MAX;
+    for (other, other_id) in ids.iter().enumerate() {
+        let other = other as i32;
+        if other == entry_id || crate::training::doubles::are_teammates(entry_id, other) {
+            continue;
+        }
+        let other_module_accessor = match try_get_module_accessor(*other_id) {
+            Some(acc) => acc,
+            None => continue,
+        };
+        if StatusModule::status_kind(other_module_accessor) == *FIGHTER_STATUS_KIND_NONE {
+            continue;
+        }
+        let other_pos = *PostureModule::pos(other_module_accessor);
+        let distance = app::sv_math::vec3_distance(
+            other_pos.x, other_pos.y, other_pos.z, cpu_pos.x, cpu_pos.y, cpu_pos.z,
+        );
+        nearest = nearest.min(distance);
+    }
+    nearest
 }
 
 unsafe fn get_fighter_distance_for_entry(cpu_id: FighterId) -> f32 {

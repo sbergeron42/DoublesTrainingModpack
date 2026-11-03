@@ -1431,6 +1431,14 @@ pub fn is_team_mode() -> bool {
     TEAM_MODE.load(Ordering::Relaxed)
 }
 
+/// Whether two entries are on the same team (team mode only; their team colors).
+pub fn are_teammates(a: i32, b: i32) -> bool {
+    is_team_mode()
+        && (0..4).contains(&a)
+        && (0..4).contains(&b)
+        && TEAM_COLORS[a as usize].load(Ordering::Relaxed) == TEAM_COLORS[b as usize].load(Ordering::Relaxed)
+}
+
 fn team_outlines_enabled() -> bool {
     read_with(&MENU, |m| m.team_outlines) == OnOff::ON
 }

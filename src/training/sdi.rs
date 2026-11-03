@@ -29,10 +29,10 @@ pub fn roll_direction() {
     assign(&DIRECTION[ei], current_profile_with(|p| p.sdi_state).get_random());
 }
 
-unsafe fn get_sdi_direction() -> Option<f64> {
+unsafe fn get_sdi_direction(module_accessor: &mut app::BattleObjectModuleAccessor) -> Option<f64> {
     let direction = read(&DIRECTION[eidx()]);
     direction.into_angle().map(|angle| {
-        if directional_influence::should_reverse_angle(direction) {
+        if directional_influence::should_reverse_angle(module_accessor, direction) {
             PI - angle
         } else {
             angle
@@ -56,7 +56,7 @@ pub unsafe fn check_hit_stop_delay_command(
     let counter_val = (COUNTER[ei].load(Ordering::Relaxed) + 1) % repeat;
     COUNTER[ei].store(counter_val, Ordering::Relaxed);
     if counter_val == repeat - 1 {
-        if let Some(angle) = get_sdi_direction() {
+        if let Some(angle) = get_sdi_direction(module_accessor) {
             // If there is a non-neutral direction picked,
             // modify the SDI angle Vector2f as a side-effect
             // and return 1 so the CPU knows that an SDI input occurred

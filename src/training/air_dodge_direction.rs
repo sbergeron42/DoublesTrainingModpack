@@ -46,21 +46,11 @@ unsafe fn get_angle(module_accessor: &mut app::BattleObjectModuleAccessor) -> Op
     );
     let direction = read(&AIRDODGE_STICK_DIRECTION[eidx()]);
     direction.into_angle().map(|angle| {
-        if !should_reverse_angle(direction) {
-            // Direction is LEFT/RIGHT, so don't perform any adjustment
-            angle
+        // In/Out follow the launch (LEFT/RIGHT are never mirrored)
+        if should_reverse_angle(module_accessor, direction) {
+            PI - angle
         } else {
-            let launch_speed_x = KineticEnergy::get_speed_x(KineticModule::get_energy(
-                module_accessor,
-                *FIGHTER_KINETIC_ENERGY_ID_DAMAGE,
-            )
-                as *mut app::KineticEnergy);
-            // If we're launched left, reverse stick X
-            if launch_speed_x < 0.0 {
-                PI - angle
-            } else {
-                angle
-            }
+            angle
         }
     })
 }
