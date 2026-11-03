@@ -3,6 +3,10 @@
 //! Native Trainer selectors 36/37/38 create all three Pokemon. The historical
 //! PTRAINER selector 114 also denotes that family. Standalone selectors
 //! 111/112/113 create only themselves and must not expand to Trainer resources.
+//!
+//! Pyra (EFLAME 90) and Mythra (ELIGHT 91) are one fighter that swaps with down B; ELEMENT 117 is the pair's
+//! selector. Picking either creates both. Without this family a CPU Pyra/Mythra lost its AI on its first swap
+//! and stood still for the rest of the match (13.0.5 hardware, 2026-11-03).
 
 pub fn selected_kind_includes(selected: i32, requested: i32) -> bool {
     if selected < 0 || requested < 0 {
@@ -10,6 +14,7 @@ pub fn selected_kind_includes(selected: i32, requested: i32) -> bool {
     }
     selected == requested
         || (matches!(selected, 36 | 37 | 38 | 114) && matches!(requested, 36 | 37 | 38))
+        || (matches!(selected, 90 | 91 | 117) && matches!(requested, 90 | 91))
 }
 
 #[cfg(test)]
@@ -38,6 +43,18 @@ mod tests {
             }
         }
         assert!(!selected_kind_includes(111, 112));
+    }
+
+    #[test]
+    fn pyra_and_mythra_include_each_other() {
+        for selected in [90, 91, 117] {
+            for requested in [90, 91] {
+                assert!(selected_kind_includes(selected, requested));
+            }
+            assert!(!selected_kind_includes(selected, 92));
+            assert!(!selected_kind_includes(selected, 36));
+        }
+        assert!(!selected_kind_includes(89, 91));
     }
 
     #[test]
