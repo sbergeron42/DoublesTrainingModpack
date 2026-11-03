@@ -1102,6 +1102,7 @@ pub fn training_mods() {
         // Doubles: per-CPU "CPU Behavior" and per-player "Player Damage %" in the game's Training menu
         doubles::cpu_behavior_apply_hook,
         doubles::cpu_behavior_level_hook,
+        doubles::cpu_level_setup_hook,
         doubles::player_damage_apply_hook,
         doubles::player_damage_setup_hook,
         doubles::menu_focus_hook,

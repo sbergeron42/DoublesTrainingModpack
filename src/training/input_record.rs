@@ -515,24 +515,11 @@ unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
 
     let controller_data = *p_data.add(1) as *mut ControlModuleInternal;
 
-    // Override per-fighter AI rank (self+0xC0C) before the training mode
-    // CPU behavior system reads it. Ghidra confirms set_cpu_controls reads
-    // rank from x19+0xC0C (x19=x0=p_data), NOT from TRAINING_MENU_ADDR.
-    // Each fighter has its OWN inner struct, so writing is permanent and
-    // also benefits Lua AI scripts (app::ai::rank reads the same field).
-    // The Nth call (1-indexed) = entry N.
-    if is_training_mode() && doubles::is_team_mode() {
-        let entry_id = doubles::peek_cpu_controls_entry();
-        if entry_id >= 1 && entry_id <= 3 {
-            let level = doubles::RUNTIME_CPU_LEVEL[entry_id as usize]
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if level > 0 {
-                let rank_ptr = (p_data as *mut u8).add(0xC0C) as *mut i32;
-                let rank = doubles::css_level_to_ai_rank(level as u8) as i32;
-                core::ptr::write_volatile(rank_ptr, rank);
-            }
-        }
-    }
+    // The AI rank (p_data + 0xC0C) is not written here. Writing it every frame made the game's level setter
+    // (FUN_71006b8400, which skips an unchanged rank) skip the rest of a level change: the derived float at
+    // +0xC20 and the AI's refresh, so a CPU kept part of another level (SSBU Reversing Agent docs/CPU_LEVEL.md).
+    // Each CPU's own level goes through that setter instead (doubles::cpu_behavior_level_hook and
+    // cpu_level_setup_hook).
 
     call_original!(p_data);
 

@@ -664,12 +664,6 @@ pub fn reset_cpu_controls_counter() {
     SET_CPU_CONTROLS_COUNTER.store(0, Ordering::Relaxed);
 }
 
-/// Peek at which entry the next set_cpu_controls call will process,
-/// WITHOUT incrementing the counter. Returns counter + 1 (1-indexed entry_id).
-pub fn peek_cpu_controls_entry() -> i32 {
-    SET_CPU_CONTROLS_COUNTER.load(Ordering::Relaxed) + 1
-}
-
 /// Tracks which hardware npad each human entry is assigned to.
 /// Set during clone_write based on CSS panel data. -1 = not human or unassigned.
 static HUMAN_ENTRY_NPAD: [AtomicI32; 4] = [
@@ -2130,6 +2124,10 @@ const OFFSET_CPU_BEHAVIOR_LABEL: usize = 0x1BBBF80;
 /// the first CPU's), same instructions in 13.0.4 and 13.0.5; x28 = entry id. w26 is the AI level (the CSS level
 /// through css_level_to_ai_rank: Lv. 3 = 21), stored to the entry and its AI.
 const OFFSET_CPU_BEHAVIOR_LEVEL: usize = 0x155AFB0;
+/// FUN_710155c020, which sets the CPUs up (Training start, No. of CPUs), gives them their AI level here, right
+/// before the level setter (`mov w1, w20`; w20 = the controller's +416 when the menu's behavior is CPU or Control,
+/// else 100; x28 = entry id). Same instructions in 13.0.4 and 13.0.5.
+const OFFSET_CPU_LEVEL_SETUP: usize = 0x155CEA8;
 /// Training menu object fields.
 const MENU_CPU_BEHAVIOR: usize = 0xB4C;
 const MENU_CPU_LEVEL: usize = 0xB50; // the "CPU (Lv. n)" label's level, minus one
@@ -2195,6 +2193,27 @@ pub unsafe fn cpu_behavior_level_hook(ctx: &mut skyline::hooks::InlineCtx) {
     let level = RUNTIME_CPU_LEVEL[entry].load(Ordering::Relaxed);
     if (1..=9).contains(&level) {
         ctx.registers[26].set_x(css_level_to_ai_rank(level as u8) as u64);
+    }
+}
+
+/// The same when the CPUs are set up: each gets its own level instead of the first CPU's, when the menu's behavior
+/// uses the level (CPU (Lv. n) or Control).
+#[skyline::hook(offset = OFFSET_CPU_LEVEL_SETUP, inline)]
+pub unsafe fn cpu_level_setup_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    if !is_team_mode() || TRAINING_MENU_ADDR.is_null() {
+        return;
+    }
+    let behavior = *((TRAINING_MENU_ADDR as *const u8).add(MENU_CPU_BEHAVIOR) as *const i32);
+    if behavior != 2 && behavior != 8 {
+        return;
+    }
+    let entry = ctx.registers[28].x() as usize;
+    if entry >= RUNTIME_CPU_LEVEL.len() {
+        return;
+    }
+    let level = RUNTIME_CPU_LEVEL[entry].load(Ordering::Relaxed);
+    if (1..=9).contains(&level) {
+        ctx.registers[20].set_x(css_level_to_ai_rank(level as u8) as u64);
     }
 }
 
