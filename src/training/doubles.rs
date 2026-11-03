@@ -4786,9 +4786,14 @@ pub fn css_level_to_ai_rank(css_level: u8) -> u8 {
     }
 }
 
-/// Read the hardware npad from the cached CSS panel for `entry_index`.
-/// Scans several candidate offsets since the exact field is unconfirmed.
-/// Returns the npad (>= 0) if found, or -1 on failure.
+/// Read the hardware npad (NpadId) of the controller driving a CSS panel: panel+0x390, -1 for none (CPU and
+/// empty panels). Returns -1 on failure.
+///
+/// This used to read panel+0x1FC, which is the panel's team (0 red, 1 blue, 2 green, 3 yellow), not its
+/// controller. A human P2 was bound to the controller numbered like its team: with blue (1) that is often
+/// the second controller, so it usually worked, but on 13.0.5 hardware P2's controller was npad 3, P2 was
+/// bound to npad 1 and couldn't move. +0x390 read 2 for P1 (P1's controller in the match: npad 2) and 3 for
+/// P2. Valid NpadIds are 0-7 and 0x20 (handheld).
 unsafe fn read_css_panel_npad(entry_index: u32) -> i32 {
     if entry_index as usize >= CSS_PANEL_PTRS.len() {
         return -1;
@@ -4797,27 +4802,12 @@ unsafe fn read_css_panel_npad(entry_index: u32) -> i32 {
     if panel.is_null() {
         return -1;
     }
-
-    // Diagnostic: dump candidate panel offsets that might store npad.
-    // panel+0x1F8 = is_cpu (known), so npad might be nearby.
-    let v_1f4 = core::ptr::read_volatile(panel.add(0x1F4) as *const i32);
-    let v_1fc = core::ptr::read_volatile(panel.add(0x1FC) as *const i32);
-    let v_208 = core::ptr::read_volatile(panel.add(0x208) as *const i32);
-    let v_20c = core::ptr::read_volatile(panel.add(0x20C) as *const i32);
-    let v_210 = core::ptr::read_volatile(panel.add(0x210) as *const i32);
-    let v_1f0 = core::ptr::read_volatile(panel.add(0x1F0) as *const i32);
-    debug_log(&format!(
-        "panel_npad_scan: entry={} +0x1F0={} +0x1F4={} +0x1FC={} +0x208={} +0x20C={} +0x210={}",
-        entry_index, v_1f0, v_1f4, v_1fc, v_208, v_20c, v_210
-    ));
-
-    // Best guess: panel+0x1FC (right after is_cpu at +0x1F8).
-    // Accept if it's a small non-negative integer (valid npad range 0..7).
-    if v_1fc >= 0 && v_1fc < 8 {
-        return v_1fc;
+    let npad = core::ptr::read_volatile(panel.add(0x390) as *const i32);
+    if (0..8).contains(&npad) || npad == 0x20 {
+        npad
+    } else {
+        -1
     }
-
-    -1
 }
 
 /// Save all 4 panels' state so css_panel_layout_hook can restore it on re-entry.
@@ -4846,9 +4836,7 @@ unsafe fn save_css_state_for_reentry() {
             core::ptr::read_volatile(panel.add(0x210) as *const u8) as u32,
             Ordering::Relaxed,
         );
-        // Save NpadId (controller slot) from panel+0x390.
-        // This is the authoritative source — panel+0x1FC and HUMAN_ENTRY_NPAD
-        // both return 0 for all entries regardless of actual controller.
+        // Save NpadId (controller slot) from panel+0x390, the panel's controller (read_css_panel_npad).
         SAVED_CSS_NPAD[i].store(
             core::ptr::read_volatile(panel.add(0x390) as *const i32),
             Ordering::Relaxed,
