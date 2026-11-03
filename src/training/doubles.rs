@@ -23,11 +23,6 @@ use training_mod_sync::*;
 // nn::hid constants for NpadFullKeyState button bitfield
 // ---------------------------------------------------------------------------
 const HID_X: u64 = 1 << 2;
-const HID_ZR: u64 = 1 << 9;
-const HID_DPAD_LEFT: u64 = 1 << 12;
-const HID_DPAD_UP: u64 = 1 << 13;
-const HID_DPAD_RIGHT: u64 = 1 << 14;
-const HID_DPAD_DOWN: u64 = 1 << 15;
 
 use crate::common::{FIGHTER_MANAGER_ADDR, MENU};
 use crate::common::offsets::by_version;
@@ -1342,6 +1337,32 @@ const OFFSET_GAME_TICK: usize = 0x2C5CF0;
 /// false = nothing pending, true = call state_toggle(scene, vec_entry_p2, 1).
 static DEFERRED_P2_TOGGLE: AtomicBool = AtomicBool::new(false);
 
+/// Offset of the game's Team Battle switch (Smash mode's "Solo Battle / Team Battle" banner calls it).
+/// Signature: fn(scene: *mut u8, on: u32, reassign: u32)
+/// Writes scene+0x169, hands out teams when `reassign` is set, copies scene+0x169 into every panel's
+/// flag-visible byte (panel+0x6BB) and redraws the panels. With it on, A on a panel's team flag cycles that
+/// panel's team (PANEL_TEAM) red -> blue -> green -> yellow -> red, from any player's hand. Same address and
+/// prologue in 13.0.4 and 13.0.5. SSBU Reversing Agent docs/TEAM_BATTLE.md (confirmed on 13.0.5 hardware).
+const OFFSET_SET_TEAM_BATTLE: usize = 0x1A2A270;
+
+/// Panel field: the panel's team. -1 none, 0 red, 1 blue, 2 green, 3 yellow (TEAM_COLORS' order).
+const PANEL_TEAM: usize = 0x1FC;
+
+/// Deferred native Team Battle switch, consumed by css_scene_update_hook on MainThread (the switch redraws
+/// panels and plays animations). -1 = nothing pending, 0 = off, 1 = on.
+static DEFERRED_TEAM_BATTLE: AtomicI32 = AtomicI32::new(-1);
+
+/// Offset of the character select scene's per-frame update (MainThread, x0 = scene; called through a
+/// member-function thunk at 0x1A2B540 that passes four more integer arguments). Smash mode's banner press calls
+/// the Team Battle switch from inside it. game_tick_hook doesn't run on the character select on 13.0.5 (its
+/// function is only called from AI code; checked with a hardware breakpoint), so the character select's
+/// MainThread work runs here. Same thunk and prologue in 13.0.4 and 13.0.5.
+const OFFSET_CSS_SCENE_UPDATE: usize = 0x1A2B570;
+
+/// Scene the native Team Battle is on for. Panel teams are read back into TEAM_COLORS only for this
+/// scene: before the switch the panels hold the game's own defaults, not the mod's pairing.
+static TEAM_BATTLE_SCENE: AtomicUsize = AtomicUsize::new(0);
+
 /// One-shot flag: set by clone_write_hook (entry 0), consumed by game_tick_hook.
 /// Signals that fi_data+0x2C must be written before the first render pass.
 static OUTLINE_INIT_PENDING: AtomicBool = AtomicBool::new(false);
@@ -1462,47 +1483,8 @@ fn ensure_hid_poll_thread() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Team flag material colors (white/black res colors for flag_color pane)
-// ---------------------------------------------------------------------------
-
-const TEAM_FLAG_COLORS: [(ResColor, ResColor); 4] = [
-    // Red team — vivid red
-    (ResColor { r: 255, g: 20, b: 20, a: 255 }, ResColor { r: 200, g: 0, b: 0, a: 0 }),
-    // Blue team — vivid blue
-    (ResColor { r: 20, g: 50, b: 255, a: 255 }, ResColor { r: 0, g: 30, b: 200, a: 0 }),
-    // Green team — vivid green
-    (ResColor { r: 20, g: 255, b: 20, a: 255 }, ResColor { r: 0, g: 200, b: 0, a: 0 }),
-    // Yellow team — vivid yellow
-    (ResColor { r: 255, g: 240, b: 20, a: 255 }, ResColor { r: 200, g: 190, b: 0, a: 0 }),
-];
-
-/// Status bar team colors with zero black (matching vanilla bar style).
-const STATUS_BAR_COLORS: [ResColor; 4] = [
-    ResColor { r: 255, g: 20, b: 20, a: 255 },   // Red team
-    ResColor { r: 20, g: 50, b: 255, a: 255 },    // Blue team
-    ResColor { r: 20, g: 255, b: 20, a: 255 },    // Green team
-    ResColor { r: 255, g: 240, b: 20, a: 255 },   // Yellow team
-];
-const STATUS_BAR_BLACK: ResColor = ResColor { r: 0, g: 0, b: 0, a: 0 };
-
-/// Lighter/pastel nameplate colors (matching vanilla's style, e.g. P1 vanilla = 255,114,114,200).
-const NAMEPLATE_COLORS: [ResColor; 4] = [
-    ResColor { r: 255, g: 114, b: 114, a: 200 },  // Light red
-    ResColor { r: 114, g: 150, b: 255, a: 200 },  // Light blue
-    ResColor { r: 114, g: 230, b: 130, a: 200 },  // Light green
-    ResColor { r: 255, g: 230, b: 100, a: 200 },  // Light yellow
-];
-
-/// Darker variant of status bar colors for the left-side background (stripes sit on top).
-const STATUS_BAR_COLORS_DARK: [ResColor; 4] = [
-    ResColor { r: 140, g: 10, b: 10, a: 255 },    // Dark red
-    ResColor { r: 10, g: 25, b: 140, a: 255 },     // Dark blue
-    ResColor { r: 10, g: 140, b: 10, a: 255 },     // Dark green
-    ResColor { r: 140, g: 130, b: 10, a: 255 },    // Dark yellow
-];
-
 /// Read a material's current white or black ResColor, handling both byte and float storage.
+#[cfg(feature = "doubles_ui_diagnostics")]
 unsafe fn read_material_color(material: &Material, color_type: MaterialColorType) -> ResColor {
     let (flag_bit, idx) = if color_type == MaterialColorType::BlackColor {
         (MaterialFlags::BlackColorFloat as u8, 0usize)
@@ -1526,19 +1508,6 @@ unsafe fn read_material_color(material: &Material, color_type: MaterialColorType
     }
 }
 
-/// Get the content Material for a Window pane via two-step chain: pane+0x110 → +0x08 → Material.
-unsafe fn window_content_material(pane: *mut Pane) -> *mut Material {
-    let descriptor = *((pane as *const u8).add(0x110) as *const *const u8);
-    if descriptor.is_null() { return core::ptr::null_mut(); }
-    *(descriptor.add(0x08) as *const *mut Material)
-}
-
-/// Get the secondary Material for a Window pane at pane+0x118.
-/// Used for nameplate color (btn_color_off) where the animation writes the player color.
-unsafe fn window_secondary_material(pane: *mut Pane) -> *mut Material {
-    *((pane as *const u8).add(0x118) as *const *mut Material)
-}
-
 /// Get the Material of a Picture pane (Pane+0xD8 via as_picture), or null.
 /// Every cached-pane tint goes through this: a null material here crashed
 /// Quit Training on 13.0.5 (Data Abort at 0x49, the material's m_flag).
@@ -1547,21 +1516,15 @@ unsafe fn picture_material(pane: *mut Pane) -> *mut Material {
     (&mut *pane).as_picture().material
 }
 
-/// Saved original material colors for panel bg panes (for bracket restore).
-/// [panel_idx][variant_idx] matching PANEL_BG_PANES layout.
-static mut ORIG_PANEL_WHITE: [[ResColor; 3]; 4] = [[ResColor { r: 255, g: 255, b: 255, a: 255 }; 3]; 4];
-static mut ORIG_PANEL_BLACK: [[ResColor; 3]; 4] = [[ResColor { r: 0, g: 0, b: 0, a: 0 }; 3]; 4];
-static mut PANEL_COLORS_SAVED: bool = false;
 
-/// Poll controller for team mode toggle and color cycling during CSS.
+/// Poll controller for the team mode toggle during CSS.
 /// Called from css_btn_rule_draw (draw hook) during CSS only.
 ///
 /// Controls:
-///   X          — toggle Team/Solo mode
-///   ZR + D-Up  — cycle P1's team color (R→B→G→Y→R)
-///   ZR + D-Rt  — cycle P2's team color
-///   ZR + D-Dn  — cycle P3's team color
-///   ZR + D-Lt  — cycle P4's team color
+///   X              — toggle Team/Solo mode
+///   A on a flag    — cycle that panel's team (R→B→G→Y→R). This is the game's own Team Battle flag:
+///                    turning team mode on switches the game's Team Battle on (DEFERRED_TEAM_BATTLE), and
+///                    sync_team_colors_from_panels copies each panel's team into TEAM_COLORS.
 ///
 /// Reads buttons from the background hid polling thread (works on cold boot).
 /// Falls through to Controller.just_down when available (after first training
@@ -1580,11 +1543,6 @@ unsafe fn poll_css_team_toggle() {
 
     // Check ALL controllers (any connected controller can toggle).
     let mut just_x = false;
-    let mut just_dup = false;
-    let mut just_drt = false;
-    let mut just_ddn = false;
-    let mut just_dlt = false;
-    let mut held_zr = false;
     let mut any_controller = false;
 
     for npad in 0..CONTROLLER_PTRS.len() {
@@ -1593,11 +1551,6 @@ unsafe fn poll_css_team_toggle() {
             any_controller = true;
             let c = &*(ctrl_addr as *const Controller);
             just_x |= c.just_down.x();
-            just_dup |= c.just_down.dpad_up();
-            just_drt |= c.just_down.dpad_right();
-            just_ddn |= c.just_down.dpad_down();
-            just_dlt |= c.just_down.dpad_left();
-            held_zr |= c.current_buttons.zr();
         }
     }
 
@@ -1608,11 +1561,6 @@ unsafe fn poll_css_team_toggle() {
         let prev = DRAW_PREV.swap(current, Ordering::Relaxed);
         let just = current & !prev;
         just_x = just & HID_X != 0;
-        just_dup = just & HID_DPAD_UP != 0;
-        just_drt = just & HID_DPAD_RIGHT != 0;
-        just_ddn = just & HID_DPAD_DOWN != 0;
-        just_dlt = just & HID_DPAD_LEFT != 0;
-        held_zr = current & HID_ZR != 0;
     }
 
     // X button: toggle team mode + re-layout CSS panels.
@@ -1656,6 +1604,8 @@ unsafe fn poll_css_team_toggle() {
                         core::ptr::write_volatile((panel as *mut u8).add(0x1C0), 1u8);
                     }
                 }
+                // The game's Team Battle: its flags, and A on a flag to change team.
+                DEFERRED_TEAM_BATTLE.store(1, Ordering::Relaxed);
             } else {
                 // Collapsing to solo: reduce to 1 first so css_panel_layout
                 // tears down P2's cursor/token via its built-in cleanup,
@@ -1678,6 +1628,7 @@ unsafe fn poll_css_team_toggle() {
                 // Defer P2 init to MainThread via game_tick hook.
                 // state_toggle must run on MainThread (crashes from TaskWorker).
                 DEFERRED_P2_TOGGLE.store(true, Ordering::Relaxed);
+                DEFERRED_TEAM_BATTLE.store(0, Ordering::Relaxed);
             }
             debug_log(&format!(
                 "CSS team toggle: team_mode={}, mode={:#x}, old_slots={}, new_slots={}",
@@ -1688,32 +1639,65 @@ unsafe fn poll_css_team_toggle() {
         }
         return;
     }
+}
 
-    // Color cycling (only when team mode is ON).
-    if !TEAM_MODE.load(Ordering::Relaxed) {
+/// Runs a pending native Team Battle switch (DEFERRED_TEAM_BATTLE) on MainThread. Before switching on it
+/// writes TEAM_COLORS into the panels and passes reassign = 0, so the game keeps the mod's pairing instead of
+/// handing out its own (P1/P2 red, P3/P4 blue). The game still moves the second of exactly two active players
+/// to the next team if both are on the same one, as Smash mode does.
+unsafe fn apply_deferred_team_battle() {
+    let on = DEFERRED_TEAM_BATTLE.swap(-1, Ordering::Relaxed);
+    if on < 0 {
         return;
     }
-
-    // ZR held + D-pad: cycle individual player's team color.
-    if held_zr {
-        let dirs = [just_dup, just_drt, just_ddn, just_dlt];
-        let names = ["R", "B", "G", "Y"];
-        for (i, &pressed) in dirs.iter().enumerate() {
-            if pressed {
-                let old = TEAM_COLORS[i].load(Ordering::Relaxed);
-                let new_color = (old + 1) % 4;
-                TEAM_COLORS[i].store(new_color, Ordering::Relaxed);
-                invalidate_hit_teams();
-                // Directly refresh medal/hand colors for this player.
-                DEFERRED_COLOR_REFRESH.store(1 << i, Ordering::Relaxed);
-                refresh_medal_hand_colors();
-                COOLDOWN.store(10, Ordering::Relaxed);
-                debug_log(&format!(
-                    "CSS team color: P{} → {}",
-                    i + 1, names[new_color as usize]
-                ));
+    let scene = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
+    if scene == 0 {
+        return;
+    }
+    if on == 1 {
+        for i in 0..4 {
+            let panel = CSS_PANEL_PTRS[i].load(Ordering::Relaxed);
+            if panel != 0 {
+                let team = TEAM_COLORS[i].load(Ordering::Relaxed) as i32;
+                core::ptr::write_volatile((panel as *mut u8).add(PANEL_TEAM) as *mut i32, team);
             }
         }
+    }
+    let text = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as usize;
+    type SetTeamBattleFn = unsafe extern "C" fn(*mut u8, u32, u32);
+    let set_team_battle: SetTeamBattleFn = core::mem::transmute(text + OFFSET_SET_TEAM_BATTLE);
+    set_team_battle(scene as *mut u8, on as u32, 0);
+    TEAM_BATTLE_SCENE.store(if on == 1 { scene } else { 0 }, Ordering::Relaxed);
+    debug_log(&format!("game_tick: native team battle {}", on == 1));
+}
+
+/// Copies each panel's team (the game's, changed by A on the panel's flag) into TEAM_COLORS, which the hit
+/// teams, outlines, medals and hand colours read. Every frame on the character select once the native Team
+/// Battle is on for it.
+unsafe fn sync_team_colors_from_panels() {
+    let scene = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
+    if scene == 0 || TEAM_BATTLE_SCENE.load(Ordering::Relaxed) != scene || !is_team_mode() {
+        return;
+    }
+    let mut changed = 0u32;
+    for i in 0..4 {
+        let panel = CSS_PANEL_PTRS[i].load(Ordering::Relaxed);
+        if panel == 0 {
+            continue;
+        }
+        let team = core::ptr::read_volatile((panel as *const u8).add(PANEL_TEAM) as *const i32);
+        if !(0..4).contains(&team) {
+            continue;
+        }
+        if TEAM_COLORS[i].swap(team as u32, Ordering::Relaxed) != team as u32 {
+            changed |= 1 << i;
+        }
+    }
+    if changed != 0 {
+        invalidate_hit_teams();
+        DEFERRED_COLOR_REFRESH.fetch_or(changed, Ordering::Relaxed);
+        debug_log(&format!("CSS team colors from panels: {:?}",
+            core::array::from_fn::<u32, 4, _>(|i| TEAM_COLORS[i].load(Ordering::Relaxed))));
     }
 }
 
@@ -2011,75 +1995,10 @@ unsafe fn find_pane_by_name(root: *const Pane, name: &str) -> *mut Pane {
     core::ptr::null_mut()
 }
 
-/// Cached pane pointers for the per-panel team flag hierarchy.
-/// Populated once per CSS session by `cache_flag_panes`, cleared when
-/// CSS_TRAINING_SCENE_PTR changes.
-///
-/// Per-panel flag hierarchy (confirmed via deep dump):
-///   team → flag_pos → set_btn_flag_team (vis=0!) → btn_all → btn_size →
-///     flag_sd, flag_line (vis=0), flag_color (vis=0),
-///     color_r (a=0), color_b (a=0), color_g (a=0), color_y (a=0)
-///
-/// To show a flag: set_btn_flag_team vis=1, flag_line vis=1, flag_color vis=1,
-/// team alpha=255, then set the desired color_X alpha=255 (others 0).
-struct PanelFlagPanes {
-    team: *mut Pane,
-    flag_pos: *mut Pane,
-    set_btn_flag_team: *mut Pane,
-    btn_all: *mut Pane,
-    btn_size: *mut Pane,
-    flag_line: *mut Pane,
-    flag_color: *mut Pane,
-    flag_sd: *mut Pane,
-    color_r: *mut Pane,
-    color_b: *mut Pane,
-    color_g: *mut Pane,
-    color_y: *mut Pane,
-}
-
-impl PanelFlagPanes {
-    const fn null() -> Self {
-        Self {
-            team: core::ptr::null_mut(),
-            flag_pos: core::ptr::null_mut(),
-            set_btn_flag_team: core::ptr::null_mut(),
-            btn_all: core::ptr::null_mut(),
-            btn_size: core::ptr::null_mut(),
-            flag_line: core::ptr::null_mut(),
-            flag_color: core::ptr::null_mut(),
-            flag_sd: core::ptr::null_mut(),
-            color_r: core::ptr::null_mut(),
-            color_b: core::ptr::null_mut(),
-            color_g: core::ptr::null_mut(),
-            color_y: core::ptr::null_mut(),
-        }
-    }
-}
-
-// Only written/read from the draw hook (single thread).
-static mut FLAG_PANE_CACHE: [PanelFlagPanes; 4] = [
-    PanelFlagPanes::null(), PanelFlagPanes::null(),
-    PanelFlagPanes::null(), PanelFlagPanes::null(),
-];
+// Character select panes the draw hook changes, cached once per CSS session by `cache_css_panes`. Only
+// written/read from the draw hook (single thread).
 /// Cached "Training" text pane (TextBox) — set to "Team Training" when active.
 static mut TRAINING_TEXT_PANE: *mut Pane = core::ptr::null_mut();
-/// Cached panel background panes for team coloring — 3 size variants per panel:
-/// [0] = _l (large, ≤2 slots), [1] = _m (medium), [2] = _s (small, 3+ slots).
-/// Game shows/hides variants based on player count; we tint all found.
-static mut PANEL_BG_PANES: [[*mut Pane; 3]; 4] = [[core::ptr::null_mut(); 3]; 4];
-/// Cached status bar panes (wnd_color_r_on inside set_btn_panel) for team coloring.
-static mut STATUS_BAR_PANES: [*mut Pane; 4] = [core::ptr::null_mut(); 4];
-static mut ORIG_STATUS_WHITE: [ResColor; 4] = [ResColor { r: 255, g: 255, b: 255, a: 255 }; 4];
-static mut ORIG_STATUS_BLACK: [ResColor; 4] = [ResColor { r: 0, g: 0, b: 0, a: 0 }; 4];
-static mut STATUS_COLORS_SAVED: bool = false;
-/// Cached left-side status bar Window panes (on + off variants for normal + hover states):
-///   [0] wnd_color_l_on, [1] wnd_stripe_l_on, [2] wnd_color_l_all_on,
-///   [3] wnd_color_l_off, [4] wnd_color_l_all_off.
-/// Window panes store their content material via pane+0x110 → +0x08 and secondary at +0x118.
-static mut STATUS_BAR_LEFT_PANES: [[*mut Pane; 5]; 4] = [[core::ptr::null_mut(); 5]; 4];
-/// Cached nameplate color panes (btn_color_off inside btn_color_onoff).
-/// The animation writes player color to the Window pane's +0x118 material each frame.
-static mut NAMEPLATE_PANES: [*mut Pane; 4] = [core::ptr::null_mut(); 4];
 /// Cached spirit button panes (set_btn_sp) — always hidden in doubles mod.
 static mut SPIRIT_BTN_PANES: [*mut Pane; 4] = [core::ptr::null_mut(); 4];
 /// Cached nameplate container panes (set_btn_name) for repositioning when spirits hidden.
@@ -2133,20 +2052,12 @@ unsafe fn dump_pane_tree(pane: *const Pane, depth: u32, max_depth: u32) {
     }
 }
 
-/// Populate FLAG_PANE_CACHE by searching the pane tree once.
-/// Also caches the "Training" text pane and panel background panes.
-unsafe fn cache_flag_panes(root_pane: *const Pane) {
+/// Cache the character select panes the draw hook changes by searching the pane tree once: the "Training"
+/// text pane, and per panel the spirit button and name plate container.
+unsafe fn cache_css_panes(root_pane: *const Pane) {
     // Forget the previous session's panes first. The loops below `continue`
     // when a pane isn't found, which would otherwise keep a pointer into the
     // destroyed layout.
-    FLAG_PANE_CACHE = [
-        PanelFlagPanes::null(), PanelFlagPanes::null(),
-        PanelFlagPanes::null(), PanelFlagPanes::null(),
-    ];
-    PANEL_BG_PANES = [[core::ptr::null_mut(); 3]; 4];
-    STATUS_BAR_PANES = [core::ptr::null_mut(); 4];
-    STATUS_BAR_LEFT_PANES = [[core::ptr::null_mut(); 5]; 4];
-    NAMEPLATE_PANES = [core::ptr::null_mut(); 4];
     SPIRIT_BTN_PANES = [core::ptr::null_mut(); 4];
     NAMEPLATE_CONTAINER_PANES = [core::ptr::null_mut(); 4];
 
@@ -2182,90 +2093,9 @@ unsafe fn cache_flag_panes(root_pane: *const Pane) {
             debug_log("=== END set_panel_1p SUBTREE ===");
         }
 
-        // Cache panel color window panes — 3 size variants (l/m/s).
-        // Game shows _l when ≤2 slots, _s when 3+. We tint all found.
-        let variant_names = ["window_l_color_l", "window_l_color_m", "window_l_color_s"];
-        for (vi, vname) in variant_names.iter().enumerate() {
-            let color_win = find_pane_by_name(panel as *const Pane, vname);
-            // Picture-compatible layout (material ptr at Pane+0xD8). Only
-            // cache panes that have a material, so the tints can't null-deref.
-            let material = picture_material(color_win);
-            PANEL_BG_PANES[i][vi] = if material.is_null() { core::ptr::null_mut() } else { color_win };
-            if !material.is_null() {
-                ORIG_PANEL_WHITE[i][vi] = read_material_color(&*material, MaterialColorType::WhiteColor);
-                ORIG_PANEL_BLACK[i][vi] = read_material_color(&*material, MaterialColorType::BlackColor);
-            }
-        }
-        if i == 0 {
-            let found: Vec<&str> = variant_names.iter().enumerate()
-                .filter(|(vi, _)| !PANEL_BG_PANES[0][*vi].is_null())
-                .map(|(_, n)| *n)
-                .collect();
-            debug_log(&format!("Panel bg panes found in set_panel_1p: {:?}", found));
-        }
-        PANEL_COLORS_SAVED = true;
-
-        // Cache status bar panes inside set_btn_panel.
-        let btn_panel = find_pane_by_name(panel as *const Pane, "set_btn_panel");
-        if !btn_panel.is_null() {
-            // Right side (Picture pane — material at +0xD8 via as_picture).
-            let sb = find_pane_by_name(btn_panel as *const Pane, "wnd_color_r_on");
-            let mat = picture_material(sb);
-            STATUS_BAR_PANES[i] = if mat.is_null() { core::ptr::null_mut() } else { sb };
-            if !mat.is_null() {
-                ORIG_STATUS_WHITE[i] = read_material_color(&*mat, MaterialColorType::WhiteColor);
-                ORIG_STATUS_BLACK[i] = read_material_color(&*mat, MaterialColorType::BlackColor);
-                STATUS_COLORS_SAVED = true;
-            }
-            // Left side (Window panes — content material via pane+0x110 → +0x08).
-            let left_names = [
-                "wnd_color_l_on", "wnd_stripe_l_on", "wnd_color_l_all_on",
-                "wnd_color_l_off", "wnd_color_l_all_off",
-            ];
-            for (li, lname) in left_names.iter().enumerate() {
-                let lp = find_pane_by_name(btn_panel as *const Pane, lname);
-                STATUS_BAR_LEFT_PANES[i][li] = lp;
-            }
-        }
-
-        // Cache nameplate color pane (btn_color_off inside btn_color_onoff).
-        // The animation writes the player color to btn_color_off's +0x118 material each frame.
-        // We override it in the draw hook with the team color (bracket approach).
-        let bco = find_pane_by_name(panel as *const Pane, "btn_color_onoff");
-        if !bco.is_null() {
-            let bcoff = find_pane_by_name(bco as *const Pane, "btn_color_off");
-            NAMEPLATE_PANES[i] = bcoff;
-        }
-
         // Cache spirit button and nameplate container panes.
         SPIRIT_BTN_PANES[i] = find_pane_by_name(panel as *const Pane, "set_btn_sp");
         NAMEPLATE_CONTAINER_PANES[i] = find_pane_by_name(panel as *const Pane, "set_btn_name");
-
-        let team = find_pane_by_name(panel as *const Pane, "team");
-        if team.is_null() { continue; }
-        let flag_pos = find_pane_by_name(team as *const Pane, "flag_pos");
-        let btn = find_pane_by_name(team as *const Pane, "set_btn_flag_team");
-        if btn.is_null() { continue; }
-        let btn_all = find_pane_by_name(btn as *const Pane, "btn_all");
-        let btn_size = if !btn_all.is_null() {
-            find_pane_by_name(btn_all as *const Pane, "btn_size")
-        } else {
-            core::ptr::null_mut()
-        };
-        FLAG_PANE_CACHE[i] = PanelFlagPanes {
-            team,
-            flag_pos,
-            set_btn_flag_team: btn,
-            btn_all,
-            btn_size,
-            flag_line: find_pane_by_name(btn as *const Pane, "flag_line"),
-            flag_color: find_pane_by_name(btn as *const Pane, "flag_color"),
-            flag_sd: find_pane_by_name(btn as *const Pane, "flag_sd"),
-            color_r: find_pane_by_name(btn as *const Pane, "color_r"),
-            color_b: find_pane_by_name(btn as *const Pane, "color_b"),
-            color_g: find_pane_by_name(btn as *const Pane, "color_g"),
-            color_y: find_pane_by_name(btn as *const Pane, "color_y"),
-        };
     }
 
     // Cache medal (token) and hand (cursor) Parts pane pointers.
@@ -2699,9 +2529,9 @@ pub unsafe fn radar_marker_team_colors(root_pane: &Pane) {
 }
 
 /// Called from handle_draw for every layout each frame.
-/// During training CSS on `chara_select_base`, shows/hides team flag panes
-/// based on the current TEAM_MODE state, scales flags, updates "Training"
-/// text, and tints panel backgrounds to match team colors.
+/// During training CSS on `chara_select_base`: polls the team mode toggle, restores saved CPU levels, hides
+/// the team flags and restores the panel colours in solo mode (team mode is drawn by the game's Team
+/// Battle), and hides the spirit buttons.
 pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
     if layout_name != "chara_select_base" {
         return;
@@ -2773,151 +2603,19 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
     {
         FLAG_CACHE_SCENE.store(scene, Ordering::Relaxed);
         FLAG_CACHE_ROOT.store(root_addr, Ordering::Relaxed);
-        PANEL_COLORS_SAVED = false;
-        STATUS_COLORS_SAVED = false;
-        cache_flag_panes(root_pane as *const Pane);
-        debug_log(&format!(
-            "css_flags: cached panes for scene {:#x} (team[0]={:?})",
-            scene, FLAG_PANE_CACHE[0].team
-        ));
+        cache_css_panes(root_pane as *const Pane);
+        debug_log(&format!("css_draw: cached panes for scene {:#x}", scene));
     }
-
-    let team_mode = TEAM_MODE.load(Ordering::Relaxed);
 
     // Keep vanilla is_team_battle() in sync during CSS.
     sync_team_battle_flag();
 
+    // The team flags and team colours aren't touched here: the game's Team Battle (DEFERRED_TEAM_BATTLE) shows
+    // and hides the flags and plays team_color_N on the flag, panel, name plate and bar panes, as in Smash
+    // mode. The mod used to draw its own (flags scaled 1.33, its own palette over the whole panel): measured
+    // on 13.0.5 at 1.3x Smash mode's flag size and up to dE 100 off its colours (SSBU Reversing Agent
+    // docs/TEAM_BATTLE.md).
     for i in 0..4 {
-        let fp = &FLAG_PANE_CACHE[i];
-        if fp.team.is_null() { continue; }
-
-        let color = TEAM_COLORS[i].load(Ordering::Relaxed);
-
-        if team_mode {
-            // Show flag: force visibility + alpha on every pane in the chain.
-            (*fp.team).alpha = 255;
-            (*fp.team).global_alpha = 255;
-            for p in [fp.flag_pos, fp.set_btn_flag_team, fp.btn_all, fp.btn_size,
-                       fp.flag_sd, fp.flag_line, fp.flag_color] {
-                if !p.is_null() {
-                    (*p).flags |= 1;
-                    (*p).alpha = 255;
-                    (*p).global_alpha = 255;
-                }
-            }
-
-            // Scale flags 33% larger.
-            if !fp.set_btn_flag_team.is_null() {
-                (*fp.set_btn_flag_team).scale_x = 1.33;
-                (*fp.set_btn_flag_team).scale_y = 1.33;
-            }
-
-            // Set the correct team color pane visible + opaque, others invisible.
-            let colors = [fp.color_r, fp.color_b, fp.color_g, fp.color_y];
-            for (ci, cp) in colors.iter().enumerate() {
-                if !cp.is_null() {
-                    if ci as u32 == color {
-                        (**cp).flags |= 1;
-                        (**cp).alpha = 255;
-                        (**cp).global_alpha = 255;
-                    } else {
-                        (**cp).flags &= !1;
-                        (**cp).alpha = 0;
-                        (**cp).global_alpha = 0;
-                    }
-                }
-            }
-
-            // Tint the flag_color background to match the team color.
-            let material = picture_material(fp.flag_color);
-            if !material.is_null() {
-                let (white, black) = TEAM_FLAG_COLORS[color.min(3) as usize];
-                (*material).set_white_res_color(white);
-                (*material).set_black_res_color(black);
-            }
-
-            // Tint all panel bg variants via material colors (bracket approach).
-            // We set team colors here BEFORE draw; css_post_draw() restores
-            // originals AFTER original!() so shared materials don't persist.
-            let (white, black) = TEAM_FLAG_COLORS[color.min(3) as usize];
-            for vi in 0..3 {
-                let material = picture_material(PANEL_BG_PANES[i][vi]);
-                if !material.is_null() {
-                    (*material).set_white_res_color(white);
-                    (*material).set_black_res_color(black);
-                }
-            }
-
-            // Tint status bar to match team color (bracket approach).
-            // Only for human slots — CPU slots keep their default gray.
-            let panel_ptr = CSS_PANEL_PTRS[i].load(Ordering::Relaxed) as *const u8;
-            let is_human = !panel_ptr.is_null()
-                && core::ptr::read_volatile(panel_ptr.add(0x1F8) as *const u32) == 0;
-            if is_human {
-                let tc = STATUS_BAR_COLORS[color.min(3) as usize];
-                // Right side (Picture pane).
-                let material = picture_material(STATUS_BAR_PANES[i]);
-                if !material.is_null() {
-                    (*material).set_white_res_color(tc);
-                    (*material).set_black_res_color(STATUS_BAR_BLACK);
-                }
-                // Left side (Window panes — write both content (+0x110→+0x08) and secondary (+0x118) materials).
-                // [0] bg=dark, [1] stripes=normal, [2] all=dark, [3] off_bg=dark, [4] off_all=dark.
-                let tc_dark = STATUS_BAR_COLORS_DARK[color.min(3) as usize];
-                let left_colors = [tc_dark, tc, tc_dark, tc_dark, tc_dark];
-                for li in 0..5 {
-                    let lp = STATUS_BAR_LEFT_PANES[i][li];
-                    if !lp.is_null() {
-                        let mat = window_content_material(lp);
-                        if !mat.is_null() {
-                            (*mat).set_white_res_color(left_colors[li]);
-                            (*mat).set_black_res_color(STATUS_BAR_BLACK);
-                        }
-                        let mat2 = window_secondary_material(lp);
-                        if !mat2.is_null() {
-                            (*mat2).set_white_res_color(left_colors[li]);
-                        }
-                    }
-                }
-
-                // Nameplate background (btn_color_off's +0x118 material) — lighter pastel.
-                let np = NAMEPLATE_PANES[i];
-                if !np.is_null() {
-                    let mat = window_secondary_material(np);
-                    if !mat.is_null() {
-                        (*mat).set_white_res_color(NAMEPLATE_COLORS[color.min(3) as usize]);
-                    }
-                }
-            }
-        } else {
-            // Hide flags: restore vanilla hidden state.
-            (*fp.team).alpha = 0;
-            (*fp.team).global_alpha = 0;
-            if !fp.set_btn_flag_team.is_null() {
-                (*fp.set_btn_flag_team).flags &= !1;
-                (*fp.set_btn_flag_team).scale_x = 1.0;
-                (*fp.set_btn_flag_team).scale_y = 1.0;
-            }
-            // Restore all panel bg variants to saved originals.
-            if PANEL_COLORS_SAVED {
-                for vi in 0..3 {
-                    let material = picture_material(PANEL_BG_PANES[i][vi]);
-                    if !material.is_null() {
-                        (*material).set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
-                        (*material).set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
-                    }
-                }
-            }
-            // Restore status bar to original colors.
-            if STATUS_COLORS_SAVED {
-                let material = picture_material(STATUS_BAR_PANES[i]);
-                if !material.is_null() {
-                    (*material).set_white_res_color(ORIG_STATUS_WHITE[i]);
-                    (*material).set_black_res_color(ORIG_STATUS_BLACK[i]);
-                }
-            }
-        }
-
         // Always hide spirit button and center nameplate (spirits not relevant to doubles).
         let sp = SPIRIT_BTN_PANES[i];
         if !sp.is_null() {
@@ -2981,7 +2679,7 @@ static SAVED_HAND_PLAYER_TYPE: [AtomicU32; 8] = [
     AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
 ];
 
-/// Flag: set when ZR+D-pad changes a team color, consumed by game_tick_hook
+/// Flag: set when a panel's team changes, consumed by game_tick_hook
 /// to re-call medal/hand color functions. Bitmask of player indices (bit 0-3).
 static DEFERRED_COLOR_REFRESH: AtomicU32 = AtomicU32::new(0);
 
@@ -3097,38 +2795,6 @@ pub unsafe fn refresh_medal_hand_colors() {
     debug_log("refresh_medal_hand: done");
 }
 
-/// Called from handle_draw AFTER original!() to restore shared material colors.
-/// This is the second half of the bracket: css_btn_rule_draw sets team colors,
-/// original!() draws everything, then this restores originals so the shared
-/// material doesn't persist team tinting to other panes (e.g., portraits).
-pub unsafe fn css_post_draw(layout_name: &str) {
-    if layout_name != "chara_select_base" {
-        return;
-    }
-    if CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed) == 0 {
-        return;
-    }
-    if !TEAM_MODE.load(Ordering::Relaxed) || !PANEL_COLORS_SAVED {
-        return;
-    }
-    for i in 0..4 {
-        for vi in 0..3 {
-            let material = picture_material(PANEL_BG_PANES[i][vi]);
-            if !material.is_null() {
-                (*material).set_white_res_color(ORIG_PANEL_WHITE[i][vi]);
-                (*material).set_black_res_color(ORIG_PANEL_BLACK[i][vi]);
-            }
-        }
-        // Restore status bar material after draw (bracket).
-        if STATUS_COLORS_SAVED {
-            let material = picture_material(STATUS_BAR_PANES[i]);
-            if !material.is_null() {
-                (*material).set_white_res_color(ORIG_STATUS_WHITE[i]);
-                (*material).set_black_res_color(ORIG_STATUS_BLACK[i]);
-            }
-        }
-    }
-}
 
 /// main_loop runs a "catch-up" sim tick after a slow frame (two game frames in one displayed frame, a
 /// visible jump) only while this byte is nonzero. Scene setup code sets it per scene: 1 in Training, 0 at
@@ -3170,7 +2836,7 @@ pub unsafe fn game_tick_hook(param_1: *mut u8) {
         }
     }
     call_original!(param_1);
-    // Refresh medal/hand colors when ZR+D-pad changes a team color.
+    // Refresh medal/hand colors when a panel's team changed.
     refresh_medal_hand_colors();
     if !DEFERRED_P2_TOGGLE.load(Ordering::Relaxed) {
         return;
@@ -3204,6 +2870,19 @@ pub unsafe fn game_tick_hook(param_1: *mut u8) {
     debug_log("game_tick: deferred P2 state_toggle → CPU (MainThread)");
 }
 
+/// The Training character select's MainThread work, after the scene's own update each frame: the native
+/// Team Battle switch, then the panels' teams into TEAM_COLORS and the medal/hand colours that follow them.
+#[skyline::hook(offset = OFFSET_CSS_SCENE_UPDATE)]
+pub unsafe fn css_scene_update_hook(scene: *mut u8, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let result = call_original!(scene, a1, a2, a3, a4);
+    if scene as usize == CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed) {
+        apply_deferred_team_battle();
+        sync_team_colors_from_panels();
+        refresh_medal_hand_colors();
+    }
+    result
+}
+
 /// Hook the btn_rule button handler on the CSS. Vanilla manages the Solo/Team
 /// toggle animation; we intercept its return value to flip our TEAM_MODE flag.
 /// Returns 1 when a toggle completes, 0 otherwise.
@@ -3214,6 +2893,7 @@ pub unsafe fn btn_rule_handler_hook(scene_obj: *mut u8) -> u64 {
         let new_val = !TEAM_MODE.load(Ordering::Relaxed);
         TEAM_MODE.store(new_val, Ordering::Relaxed);
         invalidate_hit_teams();
+        DEFERRED_TEAM_BATTLE.store(new_val as i32, Ordering::Relaxed);
         debug_log(&format!("btn_rule toggle: team_mode = {}", new_val));
     }
     result
@@ -3238,11 +2918,12 @@ pub unsafe fn set_panel_type_hook(panel: *mut u8, panel_type: i32) {
 pub unsafe fn css_setup_hook(parent: *const u8, mode_params: *mut u8, data_buf: *const u8) {
     // Always clear the training scene pointer at CSS entry. The old scene is
     // destroyed; without this, the draw thread can race ahead and use stale
-    // pane pointers from FLAG_PANE_CACHE before css_panel_layout_hook sets
+    // pane pointers from cache_css_panes before css_panel_layout_hook sets
     // the new address. css_panel_layout_hook will re-populate it for training.
     CSS_TRAINING_SCENE_PTR.store(0, Ordering::Relaxed);
+    TEAM_BATTLE_SCENE.store(0, Ordering::Relaxed);
     // And force the draw hook to re-cache: the new scene can land at the old
-    // scene's address, which would leave FLAG_PANE_CACHE pointing into the
+    // scene's address, which would leave the cached panes pointing into the
     // destroyed layout.
     FLAG_CACHE_SCENE.store(0, Ordering::Relaxed);
 
@@ -3364,6 +3045,8 @@ pub unsafe fn css_panel_layout_hook(scene: *mut u8, slot_count: u32, arg2: u32) 
                 let actual_slots = visible.max(2).max(saved_slots);
                 core::ptr::write_volatile(mode_ptr, 0x6);
                 call_original!(scene, actual_slots, arg2);
+                // A new character select: the game's Team Battle is off on it until switched on again.
+                DEFERRED_TEAM_BATTLE.store(1, Ordering::Relaxed);
             } else {
                 // Solo mode: vanilla training layout (mode=0xB, 2 slots).
                 // Cap max_players to 2 so the join handler won't allow a

@@ -131,9 +131,6 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
     }
 
     original!()(layout, draw_info, cmd_buffer);
-
-    // Bracket restore: undo team color tinting on shared materials after draw.
-    crate::training::doubles::css_post_draw(layout_name);
 }
 
 /// The game's own Training menu (the one + opens) has 116 option buttons, part layouts named
