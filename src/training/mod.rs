@@ -521,6 +521,7 @@ unsafe fn lra_handle(ctx: &mut InlineCtx) {
 unsafe fn stale_handle(ctx: &mut InlineCtx) {
     TRAINING_MENU_ADDR = ctx.registers[22].x() as *mut PauseMenu;
     (*TRAINING_MENU_ADDR).stale_move_toggle = 1;
+    crate::training::doubles::reset_cpu_behaviors();
     // Default "No. of CPUs" in team mode to the CSS slots in use (P4 None = 2 CPUs, 3 fighters);
     // solo keeps the vanilla default (1 CPU).
     if crate::training::doubles::is_team_mode() {
@@ -1098,6 +1099,12 @@ pub fn training_mods() {
         doubles::game_tick_hook,
         // Doubles: character select scene update — native Team Battle and team flags
         doubles::css_scene_update_hook,
+        // Doubles: per-CPU "CPU Behavior" and per-player "Player Damage %" in the game's Training menu
+        doubles::cpu_behavior_apply_hook,
+        doubles::cpu_behavior_level_hook,
+        doubles::player_damage_apply_hook,
+        doubles::player_damage_setup_hook,
+        doubles::menu_focus_hook,
         // Doubles: CSS team/solo toggle button handler
         doubles::btn_rule_handler_hook,
         // Doubles: prevent footstools between teammates in team mode

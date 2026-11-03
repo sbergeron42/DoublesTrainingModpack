@@ -24,9 +24,12 @@ use training_mod_sync::*;
 // ---------------------------------------------------------------------------
 // nn::hid constants for NpadFullKeyState button bitfield
 // ---------------------------------------------------------------------------
+const HID_A: u64 = 1 << 0;
 const HID_X: u64 = 1 << 2;
+const HID_L: u64 = 1 << 6;
+const HID_R: u64 = 1 << 7;
 
-use crate::common::{FIGHTER_MANAGER_ADDR, MENU};
+use crate::common::{FIGHTER_MANAGER_ADDR, MENU, TRAINING_MENU_ADDR};
 use crate::common::text_box::SmashTextBox;
 use crate::common::offsets::by_version;
 use training_mod_consts::OnOff;
@@ -2101,6 +2104,751 @@ unsafe fn update_title(team_mode: bool) {
     };
     if current != want {
         tb.set_text_string(want);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-CPU "CPU Behavior" in the game's Training menu
+// ---------------------------------------------------------------------------
+//
+// The game keeps one CPU Behavior for every CPU (Training menu object +0xB4C; 0/1 Stop, 2 CPU (Lv. n), 3 Walk,
+// 4 Escape, 5 Jump, 6 Attack, 7 Side Smash, 8 Control). While the Training menu is open, FUN_710155a000 runs
+// every frame and, once per CPU entry (x28 = entry id), compares that value with a cached copy and applies it
+// to the fighter if it changed (AI mode, level and the "not under Control" flags). In team mode each CPU gets
+// its own value instead: the CPU Behavior row edits one CPU at a time, L/R on the row switch to the previous or
+// next CPU (shown in the top key-help bar), and the row title shows which (e.g. "CPU Behavior (P3)"). SSBU
+// Reversing Agent docs/TRAINING_MENU.md.
+
+/// The per-CPU compare in FUN_710155a000 (`ldr w8, [sp, #56]`), same offset in 13.0.4 and 13.0.5. Its frame
+/// keeps the value at sp+64, the cached value at sp+56 and "not Control" (value != 8) at sp+32, with
+/// sp = x29 - 528 (prologue: 112-byte save area, x29 = save area + 96, then sp -= 432).
+const OFFSET_CPU_BEHAVIOR_APPLY: usize = 0x155AF24;
+/// The CPU Behavior row's label setter: fn(menu, value, label holder = menu + 1256), same in both versions. For
+/// "CPU (Lv. n)" it shows menu + MENU_CPU_LEVEL, plus one.
+const OFFSET_CPU_BEHAVIOR_LABEL: usize = 0x1BBBF80;
+/// Right after the apply loads the level for "CPU (Lv. n)" (`ldr w26, [x25, #416]`: one level for every CPU,
+/// the first CPU's), same instructions in 13.0.4 and 13.0.5; x28 = entry id. w26 is the AI level (the CSS level
+/// through css_level_to_ai_rank: Lv. 3 = 21), stored to the entry and its AI.
+const OFFSET_CPU_BEHAVIOR_LEVEL: usize = 0x155AFB0;
+/// Training menu object fields.
+const MENU_CPU_BEHAVIOR: usize = 0xB4C;
+const MENU_CPU_LEVEL: usize = 0xB50; // the "CPU (Lv. n)" label's level, minus one
+const MENU_CURSOR_ROW: usize = 0x7F0; // across pages: 0-4 the main rows, 4 = CPU Behavior
+const MENU_CPU_BEHAVIOR_LABEL: usize = 1256;
+const ROW_CPU_BEHAVIOR: i32 = 4;
+
+/// Each CPU entry's behavior value, -1 until first seen (then it starts from the menu's value).
+static CPU_BEHAVIOR: [AtomicI32; 4] = [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)];
+/// What the game last applied to each entry (its per-entry cache), -1 = nothing yet.
+static CPU_BEHAVIOR_APPLIED: [AtomicI32; 4] = [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)];
+/// The CPU entry the menu row is editing (0 = not chosen yet).
+static CPU_BEHAVIOR_EDIT: AtomicI32 = AtomicI32::new(0);
+/// Set by the draw hook when L (-1, previous CPU) or R (+1, next) is pressed on the row; the switch itself runs
+/// on MainThread in the apply hook.
+static CPU_BEHAVIOR_SWITCH: AtomicI32 = AtomicI32::new(0);
+/// Previous entry id seen by the apply hook: a smaller or equal one starts a new pass over the CPUs.
+static CPU_BEHAVIOR_PREV_ENTRY: AtomicI32 = AtomicI32::new(i32::MAX);
+/// The menu's value at the start of this pass (after a switch: the newly shown CPU's value).
+static CPU_BEHAVIOR_MENU_VALUE: AtomicI32 = AtomicI32::new(0);
+/// This pass is left to the game: it loaded something other than the menu's value (its own forced Stop).
+static CPU_BEHAVIOR_PASS_VANILLA: AtomicBool = AtomicBool::new(false);
+/// The game's own cached value at the start of this pass (sp+56 before any iteration writes it): what it last
+/// applied to every entry. An entry not tracked yet starts from it, so a pass changes only what the game would.
+static CPU_BEHAVIOR_GAME_CACHED: AtomicI32 = AtomicI32::new(-1);
+/// This pass re-applies every entry (some entry's behavior changed, or the game reset its cache).
+static CPU_BEHAVIOR_PASS_APPLY_ALL: AtomicBool = AtomicBool::new(false);
+/// What the game's cache (controller +420) holds after our last apply: each apply stores that entry's value.
+/// When it holds something else, the game reset it (it zeroes it when the menu closes, then re-applies every
+/// CPU, which starts their behavior), so every entry is re-applied, as in vanilla.
+static CPU_BEHAVIOR_LAST_STORED: AtomicI32 = AtomicI32::new(-1);
+/// The CPU whose level the "CPU (Lv. n)" label shows (0 = none yet).
+static CPU_BEHAVIOR_LABEL_ENTRY: AtomicI32 = AtomicI32::new(0);
+
+/// New Training session: every CPU starts from the menu's values again (behavior and damage), and the menu's
+/// panes are new.
+pub fn reset_cpu_behaviors() {
+    for i in 0..4 {
+        CPU_BEHAVIOR[i].store(-1, Ordering::Relaxed);
+        CPU_BEHAVIOR_APPLIED[i].store(-1, Ordering::Relaxed);
+    }
+    CPU_BEHAVIOR_EDIT.store(0, Ordering::Relaxed);
+    CPU_BEHAVIOR_SWITCH.store(0, Ordering::Relaxed);
+    CPU_BEHAVIOR_PREV_ENTRY.store(i32::MAX, Ordering::Relaxed);
+    CPU_BEHAVIOR_LAST_STORED.store(-1, Ordering::Relaxed);
+    CPU_BEHAVIOR_LABEL_ENTRY.store(0, Ordering::Relaxed);
+    CPU_BEHAVIOR_TITLE.reset();
+    CPU_BEHAVIOR_KEY_HELP.store(0, Ordering::Relaxed);
+    CPU_BEHAVIOR_KEY_HELP_ROOT.store(0, Ordering::Relaxed);
+    reset_player_damage();
+}
+
+/// Each CPU's own level when its behavior is "CPU (Lv. n)": the vanilla apply gives every CPU the first CPU's.
+#[skyline::hook(offset = OFFSET_CPU_BEHAVIOR_LEVEL, inline)]
+pub unsafe fn cpu_behavior_level_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    if !is_team_mode() {
+        return;
+    }
+    let entry = ctx.registers[28].x() as usize;
+    if entry >= RUNTIME_CPU_LEVEL.len() {
+        return;
+    }
+    let level = RUNTIME_CPU_LEVEL[entry].load(Ordering::Relaxed);
+    if (1..=9).contains(&level) {
+        ctx.registers[26].set_x(css_level_to_ai_rank(level as u8) as u64);
+    }
+}
+
+/// Entries 1-3 that have a fighter in the match, in entry order.
+unsafe fn entries_present() -> Vec<i32> {
+    let fm_singleton_ptr = read(&FIGHTER_MANAGER_ADDR);
+    if fm_singleton_ptr == 0 {
+        return Vec::new();
+    }
+    let fm = *(fm_singleton_ptr as *const usize);
+    if fm == 0 {
+        return Vec::new();
+    }
+    let inner = *(fm as *const usize);
+    if inner == 0 {
+        return Vec::new();
+    }
+    (1..4i32).filter(|&e| *((inner + e as usize * 8 + 0x20) as *const usize) != 0).collect()
+}
+
+/// CPU entries in the match (fighter entry exists, not a human slot), in entry order.
+unsafe fn cpu_entries() -> Vec<i32> {
+    entries_present().into_iter().filter(|&e| !is_human_entry(e)).collect()
+}
+
+/// Entries 0-3 with a fighter in the match (P1 always), in entry order.
+unsafe fn players_present() -> Vec<i32> {
+    let mut players = vec![0];
+    players.extend(entries_present());
+    players
+}
+
+/// An entry's own value for a per-player setting (`values`), starting from `first` the first time it is seen.
+fn own_value(values: &[AtomicI32; 4], entry: i32, first: i32) -> i32 {
+    let own = values[entry as usize].load(Ordering::Relaxed);
+    if own >= 0 {
+        own
+    } else {
+        values[entry as usize].store(first, Ordering::Relaxed);
+        first
+    }
+}
+
+/// The value an entry should have for a per-CPU setting (`values`): a human slot follows the menu (as in
+/// vanilla); a CPU keeps its own, starting from the menu's value the first time it is seen.
+fn desired_value(values: &[AtomicI32; 4], entry: i32, menu_shown: i32) -> i32 {
+    if is_human_entry(entry) {
+        return menu_shown;
+    }
+    own_value(values, entry, menu_shown)
+}
+
+/// The entry a row is editing: the chosen one (`chosen`) if it is still in `entries`, else the first.
+fn edit_entry(chosen: &AtomicI32, cpus: &[i32]) -> Option<i32> {
+    let current = chosen.load(Ordering::Relaxed);
+    if cpus.contains(&current) {
+        Some(current)
+    } else {
+        cpus.first().copied()
+    }
+}
+
+/// The CPU `step` places (-1 previous, +1 next) from `edit`, wrapping around.
+fn stepped_entry(cpus: &[i32], edit: i32, step: i32) -> i32 {
+    let i = cpus.iter().position(|&e| e == edit).unwrap_or(0) as i32;
+    cpus[(i + step).rem_euclid(cpus.len() as i32) as usize]
+}
+
+#[skyline::hook(offset = OFFSET_CPU_BEHAVIOR_APPLY, inline)]
+pub unsafe fn cpu_behavior_apply_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    if !is_team_mode() || TRAINING_MENU_ADDR.is_null() {
+        return;
+    }
+    let entry = ctx.registers[28].x() as i32;
+    if !(1..4).contains(&entry) {
+        return;
+    }
+    let sp = (ctx.registers[29].x() - 528) as *mut i32;
+    let value_slot = sp.byte_add(64);
+    let cached_slot = sp.byte_add(56);
+    let not_control_slot = sp.byte_add(32);
+    let menu = TRAINING_MENU_ADDR as *mut u8;
+    let menu_value = menu.add(MENU_CPU_BEHAVIOR) as *mut i32;
+
+    // First iteration of a pass: remember the menu's value, take the row's edits and run a pending switch.
+    if entry <= CPU_BEHAVIOR_PREV_ENTRY.load(Ordering::Relaxed) {
+        CPU_BEHAVIOR_GAME_CACHED.store(*cached_slot, Ordering::Relaxed);
+        let mut shown = *menu_value;
+        let vanilla = *value_slot != shown;
+        CPU_BEHAVIOR_PASS_VANILLA.store(vanilla, Ordering::Relaxed);
+        let cpus = if vanilla { Vec::new() } else { cpu_entries() };
+        if let Some(mut edit) = edit_entry(&CPU_BEHAVIOR_EDIT, &cpus) {
+            CPU_BEHAVIOR[edit as usize].store(shown, Ordering::Relaxed);
+            let step = CPU_BEHAVIOR_SWITCH.swap(0, Ordering::Relaxed);
+            if step != 0 && cpus.len() > 1 {
+                edit = stepped_entry(&cpus, edit, step);
+                let next_value = CPU_BEHAVIOR[edit as usize].load(Ordering::Relaxed);
+                if next_value >= 0 {
+                    shown = next_value;
+                }
+                *menu_value = shown;
+            }
+            CPU_BEHAVIOR_EDIT.store(edit, Ordering::Relaxed);
+            // The row shows the edited CPU's value, and "CPU (Lv. n)" its own level.
+            if CPU_BEHAVIOR_LABEL_ENTRY.swap(edit, Ordering::Relaxed) != edit {
+                let level = RUNTIME_CPU_LEVEL[edit as usize].load(Ordering::Relaxed);
+                if (1..=9).contains(&level) {
+                    *(menu.add(MENU_CPU_LEVEL) as *mut i32) = level as i32 - 1;
+                }
+                type LabelFn = unsafe extern "C" fn(*mut u8, i32, *mut u8);
+                let text = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as usize;
+                let set_label: LabelFn = core::mem::transmute(text + OFFSET_CPU_BEHAVIOR_LABEL);
+                set_label(menu, shown, menu.add(MENU_CPU_BEHAVIOR_LABEL));
+            }
+        } else {
+            CPU_BEHAVIOR_SWITCH.store(0, Ordering::Relaxed);
+        }
+        CPU_BEHAVIOR_MENU_VALUE.store(shown, Ordering::Relaxed);
+
+        // Like vanilla, a pass applies to every entry or to none: all of them are re-applied (each with its own
+        // value) if any entry's behavior changes, or if the game reset its cache. Missing the reset left the
+        // CPUs standing still after the menu closed (13.0.5 hardware, 2026-11-03).
+        if !vanilla {
+            let game_cached = CPU_BEHAVIOR_GAME_CACHED.load(Ordering::Relaxed);
+            let mut dirty = game_cached != CPU_BEHAVIOR_LAST_STORED.load(Ordering::Relaxed);
+            for e in entries_present() {
+                if CPU_BEHAVIOR_APPLIED[e as usize].load(Ordering::Relaxed) < 0 {
+                    CPU_BEHAVIOR_APPLIED[e as usize].store(game_cached, Ordering::Relaxed);
+                }
+                dirty |= desired_value(&CPU_BEHAVIOR, e, shown) != CPU_BEHAVIOR_APPLIED[e as usize].load(Ordering::Relaxed);
+            }
+            CPU_BEHAVIOR_PASS_APPLY_ALL.store(dirty, Ordering::Relaxed);
+        }
+    }
+    CPU_BEHAVIOR_PREV_ENTRY.store(entry, Ordering::Relaxed);
+    if CPU_BEHAVIOR_PASS_VANILLA.load(Ordering::Relaxed) {
+        // The game applies its own value (when it differs from its cache) to every entry: track it.
+        if *value_slot != *cached_slot {
+            CPU_BEHAVIOR_APPLIED[entry as usize].store(*value_slot, Ordering::Relaxed);
+            CPU_BEHAVIOR_LAST_STORED.store(*value_slot, Ordering::Relaxed);
+        }
+        return;
+    }
+
+    let desired = desired_value(&CPU_BEHAVIOR, entry, CPU_BEHAVIOR_MENU_VALUE.load(Ordering::Relaxed));
+    CPU_BEHAVIOR_APPLIED[entry as usize].store(desired, Ordering::Relaxed);
+    *value_slot = desired;
+    // -1 never matches, so the game applies; the value itself makes it skip.
+    if CPU_BEHAVIOR_PASS_APPLY_ALL.load(Ordering::Relaxed) {
+        *cached_slot = -1;
+        CPU_BEHAVIOR_LAST_STORED.store(desired, Ordering::Relaxed);
+    } else {
+        *cached_slot = desired;
+    }
+    *not_control_slot = (desired != 8) as i32;
+}
+
+// ---------------------------------------------------------------------------
+// Player Damage %: one row for every player's damage
+// ---------------------------------------------------------------------------
+//
+// The game has two damage settings: CPU Damage % (Training menu object +0xB44, main page row 1) for every CPU,
+// and P1 Damage % (+0xB64, Other Settings row 12) for P1. Both are applied by FUN_710155a000 while the menu is
+// open:
+// - CPU Damage %: before its loop over the entries after P1, it compares the value with a cache (Training CPU
+//   controller +428) and sets sp+60 when they differ; it also loads the value as an int (sp+36) and a float
+//   (s8). For each entry that passes its CPU check (the human P2 does too), if sp+60 is set: the cache takes the
+//   int, the fighter's damage is brought to the float (Nana's too), and the float is kept as the entry's
+//   respawn damage (main+0x52C5180 + entry * 608 + 1580, read by sub_1508ba0). The cache is set to -1 when the
+//   controller is made (sub_1561e40) and nothing resets it when the menu closes.
+// - P1 Damage %: after the loop, the same for P1 with its own cache (controller +432), from the value loaded
+//   before the loop.
+// In team mode the main page's row becomes "Player Damage %": it edits one player at a time (L/R on the row
+// switch players, P1 to P4, humans too) and P1 Damage % is hidden. P1's value reaches the game through +0xB64,
+// so the game's own P1 path applies it; the others go through the hooks below. SSBU Reversing Agent
+// docs/TRAINING_MENU.md.
+
+/// The damage block's first instruction for an entry (`ldr w9, [sp, #60]`), after the CPU check; x28 = entry
+/// id, x25 = the Training CPU controller. Same instructions in 13.0.4 and 13.0.5.
+const OFFSET_PLAYER_DAMAGE_APPLY: usize = 0x155AB90;
+/// FUN_710155c020, which sets the CPUs up, gives each one the menu's damage: s8 = float(+0xB44) at 0x155c6b8,
+/// x26 = entry id. Right after the conversion; same in both versions.
+const OFFSET_PLAYER_DAMAGE_SETUP: usize = 0x155C6BC;
+const MENU_CPU_DAMAGE: usize = 0xB44;
+const MENU_P1_DAMAGE: usize = 0xB64;
+/// The CPU Damage % row's label holder: the menu writes the number into the text box at holder + 16.
+const MENU_CPU_DAMAGE_LABEL: usize = 1024;
+const ROW_CPU_DAMAGE: i32 = 1;
+const CONTROLLER_DAMAGE_CACHE: usize = 428;
+/// PLAYER_DAMAGE_LAST_STORED before a session's first pass: taken from the game's cache then.
+const DAMAGE_UNKNOWN: i32 = i32::MIN;
+const PLAYER_DAMAGE_TITLE_TEXT: &str = "Player Damage %";
+const PLAYER_DAMAGE_HELP_TEXT: &str = "Set each player's damage percent.";
+
+/// Each player's damage (entries 0-3), -1 until first seen. P1 starts from P1 Damage %, the others from CPU
+/// Damage %.
+static PLAYER_DAMAGE: [AtomicI32; 4] = [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)];
+/// The damage last applied to each entry after P1, -1 = nothing yet.
+static PLAYER_DAMAGE_APPLIED: [AtomicI32; 4] = [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)];
+/// The player the row is editing.
+static PLAYER_DAMAGE_EDIT: AtomicI32 = AtomicI32::new(0);
+/// The player whose damage the row's value (+0xB44) holds, -1 = still the game's CPU Damage %.
+static PLAYER_DAMAGE_ROW_ENTRY: AtomicI32 = AtomicI32::new(-1);
+/// L (-1) or R (+1) on the row, run by the apply hook (MainThread).
+static PLAYER_DAMAGE_SWITCH: AtomicI32 = AtomicI32::new(0);
+/// Previous entry id seen by the apply hook: a smaller or equal one starts a new pass.
+static PLAYER_DAMAGE_PREV_ENTRY: AtomicI32 = AtomicI32::new(i32::MAX);
+/// This pass applies every entry's damage.
+static PLAYER_DAMAGE_PASS_APPLY: AtomicBool = AtomicBool::new(false);
+/// What the game's cache holds after our last apply. Anything else means the game wrote it.
+static PLAYER_DAMAGE_LAST_STORED: AtomicI32 = AtomicI32::new(DAMAGE_UNKNOWN);
+
+/// New Training session: every player starts from the menu's damage again.
+fn reset_player_damage() {
+    for i in 0..4 {
+        PLAYER_DAMAGE[i].store(-1, Ordering::Relaxed);
+        PLAYER_DAMAGE_APPLIED[i].store(-1, Ordering::Relaxed);
+    }
+    PLAYER_DAMAGE_EDIT.store(0, Ordering::Relaxed);
+    PLAYER_DAMAGE_ROW_ENTRY.store(-1, Ordering::Relaxed);
+    PLAYER_DAMAGE_SWITCH.store(0, Ordering::Relaxed);
+    PLAYER_DAMAGE_PREV_ENTRY.store(i32::MAX, Ordering::Relaxed);
+    PLAYER_DAMAGE_LAST_STORED.store(DAMAGE_UNKNOWN, Ordering::Relaxed);
+    PLAYER_DAMAGE_TITLE.reset();
+    P1_DAMAGE_ROW.store(0, Ordering::Relaxed);
+    P1_DAMAGE_ROW_ROOT.store(0, Ordering::Relaxed);
+    ROW_HELP.store(0, Ordering::Relaxed);
+    ROW_HELP_ROOT.store(0, Ordering::Relaxed);
+}
+
+/// Redraws the CPU Damage % row's number, as the menu does when the value changes.
+unsafe fn set_damage_label(menu: *mut u8, value: i32) {
+    let holder = *(menu.add(MENU_CPU_DAMAGE_LABEL) as *const usize);
+    if holder == 0 {
+        return;
+    }
+    let tb = *((holder + 16) as *const *mut TextBox);
+    if !tb.is_null() {
+        (*tb).set_text_string(&value.to_string());
+    }
+}
+
+#[skyline::hook(offset = OFFSET_PLAYER_DAMAGE_APPLY, inline)]
+pub unsafe fn player_damage_apply_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    if !is_team_mode() || TRAINING_MENU_ADDR.is_null() {
+        return;
+    }
+    let entry = ctx.registers[28].x() as i32;
+    if !(1..4).contains(&entry) {
+        return;
+    }
+    let sp = (ctx.registers[29].x() - 528) as *mut i32;
+    let damage_slot = sp.byte_add(36);
+    let apply_slot = sp.byte_add(60);
+    let cache = (ctx.registers[25].x() as *mut u8).add(CONTROLLER_DAMAGE_CACHE) as *const i32;
+    let menu = TRAINING_MENU_ADDR as *mut u8;
+    let row_value = menu.add(MENU_CPU_DAMAGE) as *mut i32;
+    let p1_value = menu.add(MENU_P1_DAMAGE) as *mut i32;
+
+    // First iteration of a pass: take the row's edit, run a pending switch, and decide whether this pass applies.
+    if entry <= PLAYER_DAMAGE_PREV_ENTRY.load(Ordering::Relaxed) {
+        let game_cached = *cache;
+        let players = players_present();
+        if PLAYER_DAMAGE_ROW_ENTRY.load(Ordering::Relaxed) < 0 {
+            // The row still holds the game's CPU Damage %: P1 starts from P1 Damage %, everyone else from it.
+            own_value(&PLAYER_DAMAGE, 0, *p1_value);
+            for &e in &players[1..] {
+                own_value(&PLAYER_DAMAGE, e, *row_value);
+            }
+        }
+        if let Some(mut edit) = edit_entry(&PLAYER_DAMAGE_EDIT, &players) {
+            let row_entry = PLAYER_DAMAGE_ROW_ENTRY.load(Ordering::Relaxed);
+            if row_entry == edit {
+                PLAYER_DAMAGE[edit as usize].store(*row_value, Ordering::Relaxed);
+            }
+            let step = PLAYER_DAMAGE_SWITCH.swap(0, Ordering::Relaxed);
+            if step != 0 && players.len() > 1 {
+                if row_entry >= 0 {
+                    PLAYER_DAMAGE[row_entry as usize].store(*row_value, Ordering::Relaxed);
+                }
+                edit = stepped_entry(&players, edit, step);
+            }
+            if PLAYER_DAMAGE_ROW_ENTRY.swap(edit, Ordering::Relaxed) != edit {
+                let shown = own_value(&PLAYER_DAMAGE, edit, *row_value);
+                *row_value = shown;
+                set_damage_label(menu, shown);
+            }
+            PLAYER_DAMAGE_EDIT.store(edit, Ordering::Relaxed);
+        } else {
+            PLAYER_DAMAGE_SWITCH.store(0, Ordering::Relaxed);
+        }
+        // P1 goes through the game's own P1 Damage % path (its row is hidden), a frame later.
+        *p1_value = own_value(&PLAYER_DAMAGE, 0, *p1_value);
+
+        // Every entry or none, each with its own damage: when an entry's damage changed, or the game wrote its
+        // cache. The game's own flag still counts when its cache matches the row (it also sets it in a state of
+        // its own, not only on a change). A session's first pass starts from the game's cache, so opening the
+        // menu doesn't reset damage the fighters took.
+        if PLAYER_DAMAGE_LAST_STORED.load(Ordering::Relaxed) == DAMAGE_UNKNOWN {
+            PLAYER_DAMAGE_LAST_STORED.store(game_cached, Ordering::Relaxed);
+        }
+        let mut dirty = game_cached != PLAYER_DAMAGE_LAST_STORED.load(Ordering::Relaxed)
+            || (*apply_slot != 0 && game_cached == *row_value);
+        for &e in &players[1..] {
+            if PLAYER_DAMAGE_APPLIED[e as usize].load(Ordering::Relaxed) < 0 {
+                PLAYER_DAMAGE_APPLIED[e as usize].store(game_cached, Ordering::Relaxed);
+            }
+            dirty |= own_value(&PLAYER_DAMAGE, e, *row_value) != PLAYER_DAMAGE_APPLIED[e as usize].load(Ordering::Relaxed);
+        }
+        PLAYER_DAMAGE_PASS_APPLY.store(dirty, Ordering::Relaxed);
+    }
+    PLAYER_DAMAGE_PREV_ENTRY.store(entry, Ordering::Relaxed);
+
+    let desired = own_value(&PLAYER_DAMAGE, entry, *row_value);
+    *damage_slot = desired;
+    ctx.registers_f[8].set_s(desired as f32);
+    let apply = PLAYER_DAMAGE_PASS_APPLY.load(Ordering::Relaxed);
+    *apply_slot = apply as i32;
+    if apply {
+        PLAYER_DAMAGE_APPLIED[entry as usize].store(desired, Ordering::Relaxed);
+        PLAYER_DAMAGE_LAST_STORED.store(desired, Ordering::Relaxed);
+    }
+}
+
+/// A fighter set up again (FUN_710155c020) gets its own damage, not the menu's.
+#[skyline::hook(offset = OFFSET_PLAYER_DAMAGE_SETUP, inline)]
+pub unsafe fn player_damage_setup_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    if !is_team_mode() {
+        return;
+    }
+    let entry = ctx.registers[26].x() as i32;
+    if !(1..4).contains(&entry) {
+        return;
+    }
+    let own = PLAYER_DAMAGE[entry as usize].load(Ordering::Relaxed);
+    if own >= 0 {
+        ctx.registers_f[8].set_s(own as f32);
+    }
+}
+
+/// The menu's rows are items of focus groups (Other Settings' group at *(menu + 1960), the main page's at
+/// *(menu + 1976)): Up/Down move the focus, and the menu reads the newly focused item here, right after loading
+/// it (`cmn w20, #1` in sub_1bc0f30; x19 = menu, w20 = item id = cursor row, 13 = Quit Training, x0 = the group
+/// that reported it). Same in 13.0.4. With P1 Damage % (row 12) hidden, Down from Stale Moves (11) reported Quit
+/// Training (13), which the menu handles on its own path and which left the page (13.0.5 hardware).
+const OFFSET_MENU_FOCUS_CHANGED: usize = 0x1BC163C;
+/// Moves a focus group's focus: fn(group holder, item id, 0); the menu calls it the same way.
+fn offset_menu_set_focus() -> usize {
+    crate::common::offsets::by_version(0x37714D0, 0x3771A80)
+}
+/// The Other Settings page's focus group holder (a pointer to the group).
+const MENU_FOCUS_OTHERS: usize = 1960;
+const ROW_SPEED: i32 = 7;
+const ROW_STALE_MOVES: i32 = 11;
+const ROW_P1_DAMAGE: i32 = 12;
+const ROW_QUIT_TRAINING: i32 = 13;
+
+/// In team mode the focus never reaches the hidden P1 Damage % row: Down from Stale Moves wraps to Speed, as Down
+/// from the last row does in vanilla, and anything else that lands on it goes to Stale Moves.
+#[skyline::hook(offset = OFFSET_MENU_FOCUS_CHANGED, inline)]
+pub unsafe fn menu_focus_hook(ctx: &mut skyline::hooks::InlineCtx) {
+    if !is_team_mode() {
+        return;
+    }
+    let menu = ctx.registers[19].x() as *mut u8;
+    let holder = menu.add(MENU_FOCUS_OTHERS);
+    if menu.is_null() || *(holder as *const u64) != ctx.registers[0].x() {
+        return;
+    }
+    let new = ctx.registers[20].w() as i32;
+    let current = *(menu.add(MENU_CURSOR_ROW) as *const i32);
+    let want = match (current, new) {
+        (ROW_STALE_MOVES, ROW_P1_DAMAGE) | (ROW_STALE_MOVES, ROW_QUIT_TRAINING) => ROW_SPEED,
+        (_, ROW_P1_DAMAGE) => ROW_STALE_MOVES,
+        _ => return,
+    };
+    type SetFocusFn = unsafe extern "C" fn(*mut u8, i32, i32);
+    let text = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as usize;
+    let set_focus: SetFocusFn = core::mem::transmute(text + offset_menu_set_focus());
+    set_focus(holder, want, 0);
+    ctx.registers[20].set_w(want as u32);
+}
+
+/// Other Settings' P1 Damage % row (set_others_05) and the help footer's row text (set_txt_help_00), with the
+/// layout root they were found in.
+static P1_DAMAGE_ROW: AtomicUsize = AtomicUsize::new(0);
+static P1_DAMAGE_ROW_ROOT: AtomicUsize = AtomicUsize::new(0);
+static ROW_HELP: AtomicUsize = AtomicUsize::new(0);
+static ROW_HELP_ROOT: AtomicUsize = AtomicUsize::new(0);
+
+/// A pane by name, cached for its layout root and checked by name before use (as RowTitle).
+unsafe fn cached_pane(root: &Pane, cache: &AtomicUsize, cache_root: &AtomicUsize, name: &str) -> *mut Pane {
+    let root_addr = root as *const Pane as usize;
+    let mut pane = cache.load(Ordering::Relaxed) as *mut Pane;
+    let new_root = cache_root.swap(root_addr, Ordering::Relaxed) != root_addr;
+    if new_root || (!pane.is_null() && !pane_named(pane, name)) {
+        pane = find_pane_by_name(root as *const Pane, name);
+        cache.store(pane as usize, Ordering::Relaxed);
+    }
+    pane
+}
+
+/// Previous L (bit 0), R (bit 1) and A (bit 2) state for the switch's edge detection.
+static CPU_BEHAVIOR_PREV_BUTTONS: AtomicU64 = AtomicU64::new(0);
+/// L (bit 0) or R (bit 1) pressed alone and still held: released without the other shoulder or A joining it,
+/// it is a switch. Pressed first, L of L+R+A switched CPUs (13.0.5 hardware, 40 ms before R).
+static CPU_BEHAVIOR_TAP: AtomicU64 = AtomicU64::new(0);
+/// The key help the mod adds to the Training menu's top bar (`btn_keyhelp_cpu`, a com_btn_keyhelp_00 part next
+/// to Y Camera, hidden in the layout; SSBU Reversing Agent scripts/layout_add_keyhelp.py adds it to
+/// src/static/layout.arc), and the layout root it was found in. Same lifetime rules as the title below.
+static CPU_BEHAVIOR_KEY_HELP: AtomicUsize = AtomicUsize::new(0);
+static CPU_BEHAVIOR_KEY_HELP_ROOT: AtomicUsize = AtomicUsize::new(0);
+/// The icon and text x inside the part (its own are 7 and 53, for one icon). The icon text grows left: at 7,
+/// "L/R" ran from 38 px before the part into "Camera". Measured on 13.0.5 hardware: the icon moves about 1.24
+/// px per unit (a scaled parent), the text 1:1. At these x, L starts about 41 px after "Camera" (the game's gaps
+/// are 42-46) and the text about 11 px after R (the game's Y to "Camera" is 10).
+const CPU_BEHAVIOR_KEY_HELP_ICON_X: f32 = 42.0;
+const CPU_BEHAVIOR_KEY_HELP_TEXT_X: f32 = 109.0;
+/// A main-menu row whose title names the CPU it edits, e.g. "CPU Behavior (P3)": the row pane (`row_name`), its
+/// title text pane, the layout root they were found in, and the game's own title. Cleared for each Training
+/// session and checked by name before use: a new session's layout can sit at the old one's address, and a stale
+/// title pointer then wrote " (P3)" into an unrelated text box every frame (seen on 13.0.5 hardware after Quit
+/// Training and back).
+struct RowTitle {
+    row_name: &'static str,
+    row: AtomicUsize,
+    title: AtomicUsize,
+    root: AtomicUsize,
+    original: std::sync::Mutex<Option<String>>,
+}
+
+impl RowTitle {
+    const fn new(row_name: &'static str) -> Self {
+        RowTitle {
+            row_name,
+            row: AtomicUsize::new(0),
+            title: AtomicUsize::new(0),
+            root: AtomicUsize::new(0),
+            original: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn reset(&self) {
+        self.row.store(0, Ordering::Relaxed);
+        self.title.store(0, Ordering::Relaxed);
+        self.root.store(0, Ordering::Relaxed);
+    }
+
+    /// The game's title (or `name`), plus " (Pn)" while `cpu` is set. Writes only when the text differs.
+    unsafe fn update(&self, root: &Pane, cpu: Option<i32>, name: Option<&str>) {
+        let root_addr = root as *const Pane as usize;
+        let row = self.row.load(Ordering::Relaxed) as *const Pane;
+        let title = self.title.load(Ordering::Relaxed) as *mut Pane;
+        let cached_ok = !row.is_null()
+            && !title.is_null()
+            && pane_named(row, self.row_name)
+            && pane_named(title, "set_txt_title");
+        let new_root = self.root.swap(root_addr, Ordering::Relaxed) != root_addr;
+        // Look the panes up again for a new root, or when cached ones no longer carry their names (not every
+        // frame when the row is simply missing).
+        let title = if cached_ok && !new_root {
+            title
+        } else if new_root || !row.is_null() || !title.is_null() {
+            let row = find_pane_by_name(root as *const Pane, self.row_name);
+            let title = if row.is_null() { core::ptr::null_mut() } else { find_pane_by_name(row, "set_txt_title") };
+            self.row.store(row as usize, Ordering::Relaxed);
+            self.title.store(title as usize, Ordering::Relaxed);
+            title
+        } else {
+            core::ptr::null_mut()
+        };
+        if title.is_null() {
+            return;
+        }
+        let tb = (*title).as_textbox();
+        let current = match textbox_string(tb) {
+            Some(s) => s,
+            None => return,
+        };
+        let mut original = self.original.lock().unwrap();
+        if (!current.ends_with(')') && Some(current.as_str()) != name) || original.is_none() {
+            *original = Some(current.clone());
+        }
+        let base = match name.or(original.as_deref()) {
+            Some(s) => s,
+            None => return,
+        };
+        let want = match cpu {
+            Some(e) => format!("{} (P{})", base, e + 1),
+            None => base.to_string(),
+        };
+        if current != want {
+            tb.set_text_string(&want);
+        }
+    }
+}
+
+static CPU_BEHAVIOR_TITLE: RowTitle = RowTitle::new("set_main_04");
+static PLAYER_DAMAGE_TITLE: RowTitle = RowTitle::new("set_main_01");
+
+/// Whether a pane is named exactly `name`.
+unsafe fn pane_named(pane: *const Pane, name: &str) -> bool {
+    let stored = &(*pane).name;
+    let bytes = name.as_bytes();
+    bytes.len() < stored.len()
+        && bytes.iter().zip(stored.iter()).all(|(a, b)| *a == *b as u8)
+        && stored[bytes.len()] == 0
+}
+
+/// L (bit 0), R (bit 1) and A (bit 2) held on any controller, from the game's controller state (a GameCube
+/// controller's L and R triggers read as l() and r() there too), or from the HID poll before the game has
+/// controllers.
+unsafe fn switch_buttons_held() -> u64 {
+    let mut held = 0;
+    let mut any = false;
+    for ptr in CONTROLLER_PTRS.iter() {
+        let addr = ptr.load(Ordering::Relaxed);
+        if addr != 0 {
+            any = true;
+            let b = (*(addr as *const Controller)).current_buttons;
+            held |= (b.l() || b.real_digital_l()) as u64
+                | ((b.r() || b.real_digital_r()) as u64) << 1
+                | (b.a() as u64) << 2;
+        }
+    }
+    if !any {
+        ensure_hid_poll_thread();
+        let buttons = HID_POLL_CURRENT.load(Ordering::Relaxed);
+        held = (buttons & HID_L != 0) as u64
+            | ((buttons & HID_R != 0) as u64) << 1
+            | ((buttons & HID_A != 0) as u64) << 2;
+    }
+    held
+}
+
+/// The key help shows "L/R" and `text` (e.g. "Switch CPU") while `text` is set, and is hidden otherwise. Its
+/// icons are the L and R glyphs for P1's controller, as the mod's own menu picks them.
+unsafe fn cpu_behavior_key_help(root: &Pane, text: Option<&str>) {
+    let root_addr = root as *const Pane as usize;
+    let mut part = CPU_BEHAVIOR_KEY_HELP.load(Ordering::Relaxed) as *mut Pane;
+    let new_root = CPU_BEHAVIOR_KEY_HELP_ROOT.swap(root_addr, Ordering::Relaxed) != root_addr;
+    if new_root || (!part.is_null() && !pane_named(part, "btn_keyhelp_cpu")) {
+        part = find_pane_by_name(root as *const Pane, "btn_keyhelp_cpu");
+        CPU_BEHAVIOR_KEY_HELP.store(part as usize, Ordering::Relaxed);
+    }
+    if part.is_null() {
+        return;
+    }
+    (*part).set_visible(text.is_some());
+    let text = match text {
+        Some(t) => t,
+        None => return,
+    };
+    let icon = find_pane_by_name(part, "set_txt_icon");
+    let help = find_pane_by_name(part, "set_txt_help");
+    if icon.is_null() || help.is_null() {
+        return;
+    }
+    let glyphs: [u16; 3] = if read(&crate::common::menu::P1_CONTROLLER_STYLE) == ControllerStyle::GCController {
+        [0xE204, b'/' as u16, 0xE205]
+    } else {
+        [0xE0E4, b'/' as u16, 0xE0E5]
+    };
+    let icon_tb = (*icon).as_textbox();
+    let want = String::from_utf16_lossy(&glyphs);
+    if textbox_string(icon_tb).as_deref() != Some(want.as_str()) {
+        // A placeholder of the same length sizes the buffer, then the glyphs go in as UTF-16 (as set_icon_text).
+        icon_tb.set_text_string("L/R");
+        if !icon_tb.text_buf.is_null() && icon_tb.text_len as usize == glyphs.len() {
+            let buf = icon_tb.text_buf as *mut u16;
+            for (i, g) in glyphs.iter().enumerate() {
+                *buf.add(i) = *g;
+            }
+        }
+    }
+    let help_tb = (*help).as_textbox();
+    if textbox_string(help_tb).as_deref() != Some(text) {
+        help_tb.set_text_string(text);
+    }
+    (*icon).pos_x = CPU_BEHAVIOR_KEY_HELP_ICON_X;
+    (*help).pos_x = CPU_BEHAVIOR_KEY_HELP_TEXT_X;
+}
+
+/// From the info_training draw, in team mode: L or R on the Player Damage % row switches player, on the CPU
+/// Behavior row CPU (when there are two or more), the top key-help bar says so, and each row's title says whom
+/// it edits. Other Settings' P1 Damage % row is hidden: Player Damage % covers P1.
+pub unsafe fn cpu_behavior_menu_draw(root: &Pane, menu_open: bool) {
+    if TRAINING_MENU_ADDR.is_null() {
+        return;
+    }
+    let menu = TRAINING_MENU_ADDR as *const u8;
+    let team = is_team_mode();
+    let cpus = if team { cpu_entries() } else { Vec::new() };
+    let players = if team { players_present() } else { Vec::new() };
+    let cursor = if menu_open { core::ptr::read_volatile(menu.add(MENU_CURSOR_ROW) as *const i32) } else { -1 };
+    let switch = match cursor {
+        ROW_CPU_BEHAVIOR if cpus.len() > 1 => Some((&CPU_BEHAVIOR_SWITCH, "Switch CPU")),
+        ROW_CPU_DAMAGE if players.len() > 1 => Some((&PLAYER_DAMAGE_SWITCH, "Switch Player")),
+        _ => None,
+    };
+
+    // A tap of one shoulder alone, on release: L+R+A is the game's Reset Positions.
+    let held = switch_buttons_held();
+    let prev = CPU_BEHAVIOR_PREV_BUTTONS.swap(held, Ordering::Relaxed);
+    let (pressed, released) = (held & !prev, prev & !held);
+    let mut tap = CPU_BEHAVIOR_TAP.load(Ordering::Relaxed);
+    for (shoulder, others) in [(0b001, 0b110), (0b010, 0b101)] {
+        if pressed & shoulder != 0 && held & others == 0 {
+            tap |= shoulder;
+        }
+        if held & others != 0 {
+            tap &= !shoulder;
+        }
+    }
+    let step = if released & tap & 0b001 != 0 {
+        -1
+    } else if released & tap & 0b010 != 0 {
+        1
+    } else {
+        0
+    };
+    CPU_BEHAVIOR_TAP.store(tap & held, Ordering::Relaxed);
+    if let Some((switch, _)) = switch {
+        if step != 0 {
+            switch.store(step, Ordering::Relaxed);
+        }
+    }
+    cpu_behavior_key_help(root, switch.map(|(_, text)| text));
+
+    let behavior_cpu = if cpus.len() > 1 { edit_entry(&CPU_BEHAVIOR_EDIT, &cpus) } else { None };
+    CPU_BEHAVIOR_TITLE.update(root, behavior_cpu, None);
+    if team {
+        PLAYER_DAMAGE_TITLE.update(root, edit_entry(&PLAYER_DAMAGE_EDIT, &players), Some(PLAYER_DAMAGE_TITLE_TEXT));
+    } else {
+        PLAYER_DAMAGE_TITLE.update(root, None, None);
+    }
+
+    // P1 Damage % (Other Settings) is replaced by Player Damage % in team mode; menu_focus_hook keeps the cursor
+    // off it.
+    if team {
+        let p1_row = cached_pane(root, &P1_DAMAGE_ROW, &P1_DAMAGE_ROW_ROOT, "set_others_05");
+        if !p1_row.is_null() {
+            (*p1_row).set_visible(false);
+        }
+    }
+    // The help footer describes the selected row: "for opponents" no longer fits.
+    if team && cursor == ROW_CPU_DAMAGE {
+        let help = cached_pane(root, &ROW_HELP, &ROW_HELP_ROOT, "set_txt_help_00");
+        if !help.is_null() {
+            let tb = (*help).as_textbox();
+            if textbox_string(tb).as_deref() != Some(PLAYER_DAMAGE_HELP_TEXT) {
+                tb.set_text_string(PLAYER_DAMAGE_HELP_TEXT);
+            }
+        }
     }
 }
 

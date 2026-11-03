@@ -108,6 +108,7 @@ pub unsafe fn handle_draw(layout: *mut Layout, draw_info: u64, cmd_buffer: u64) 
 
     if layout_name == "info_training" {
         frame_counter::tick_real();
+        crate::training::doubles::cpu_behavior_menu_draw(root_pane, !training_menu_closed(root_pane));
         if crate::training::doubles::is_team_mode() {
             display::draw(root_pane);
             menu::draw(root_pane);
