@@ -12,7 +12,9 @@
 ///   so CPU Behavior doesn't need to be forced.
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use skyline::nn::ui2d::{AnimTransform, AnimTransformNode, Layout, Material, MaterialFlags, MaterialColorType, Pane, ResColor};
+use skyline::nn::ui2d::{AnimTransform, AnimTransformNode, Layout, Material, Pane, ResColor, TextBox};
+#[cfg(feature = "doubles_ui_diagnostics")]
+use skyline::nn::ui2d::{MaterialColorType, MaterialFlags};
 use smash::app::{self, lua_bind::*, BattleObjectModuleAccessor};
 use smash::lib::lua_const::*;
 #[cfg(feature = "doubles_ui_diagnostics")]
@@ -25,6 +27,7 @@ use training_mod_sync::*;
 const HID_X: u64 = 1 << 2;
 
 use crate::common::{FIGHTER_MANAGER_ADDR, MENU};
+use crate::common::text_box::SmashTextBox;
 use crate::common::offsets::by_version;
 use training_mod_consts::OnOff;
 
@@ -1328,12 +1331,12 @@ static OFFSET_CSS_MEDAL_COLOR: LazyLock<usize> = LazyLock::new(|| by_version(0x3
 /// 13.0.5: 0x32D2E7C (same code except PC-relative targets).
 static OFFSET_CSS_HAND_COLOR: LazyLock<usize> = LazyLock::new(|| by_version(0x32D28CC, 0x32D2E7C));
 
-/// Offset of FUN_71002c5cf0: main game update tick, runs per-frame on MainThread.
-/// Signature: fn(param_1: *mut u8). Hooked to execute deferred state toggles
-/// that require MainThread context (state_toggle crashes from draw hook thread).
+/// Offset of FUN_71002c5cf0, called from AI code on MainThread (lua_ai_init and one other caller; on 13.0.5
+/// a hardware breakpoint on it never fired on the character select). Signature: fn(param_1: *mut u8).
 const OFFSET_GAME_TICK: usize = 0x2C5CF0;
 
-/// Deferred P2 state toggle: set by draw hook, consumed by game_tick hook on MainThread.
+/// Deferred P2 state toggle: set by the draw hook (X to solo), consumed by apply_deferred_p2_toggle on the
+/// character select's MainThread update (state_toggle crashes from the draw hook thread).
 /// false = nothing pending, true = call state_toggle(scene, vec_entry_p2, 1).
 static DEFERRED_P2_TOGGLE: AtomicBool = AtomicBool::new(false);
 
@@ -1997,7 +2000,7 @@ unsafe fn find_pane_by_name(root: *const Pane, name: &str) -> *mut Pane {
 
 // Character select panes the draw hook changes, cached once per CSS session by `cache_css_panes`. Only
 // written/read from the draw hook (single thread).
-/// Cached "Training" text pane (TextBox) — set to "Team Training" when active.
+/// Cached "Training" title text pane (TextBox) — set to "Team Training" in team mode by update_title.
 static mut TRAINING_TEXT_PANE: *mut Pane = core::ptr::null_mut();
 /// Cached spirit button panes (set_btn_sp) — always hidden in doubles mod.
 static mut SPIRIT_BTN_PANES: [*mut Pane; 4] = [core::ptr::null_mut(); 4];
@@ -2011,6 +2014,67 @@ static FLAG_CACHE_SCENE: AtomicUsize = AtomicUsize::new(0);
 /// Root pane the cache was built from. A new CSS layout can reuse the old
 /// scene's address, so the scene alone doesn't tell us the panes are current.
 static FLAG_CACHE_ROOT: AtomicUsize = AtomicUsize::new(0);
+
+/// The direct child of `parent` with the given name, or null.
+unsafe fn find_child_by_name(parent: *const Pane, name: &str) -> *mut Pane {
+    use skyline::nn::ui2d::PaneNode;
+    let sentinel = &(*parent).children_list as *const PaneNode as *mut PaneNode;
+    let mut current = (*parent).children_list.next;
+    let mut count = 0u32;
+    while current != sentinel && count < 100 {
+        let child = (current as *const u8).sub(0x08) as *mut Pane;
+        if skyline::from_c_str((*child).name.as_ptr()) == name {
+            return child;
+        }
+        current = (*current).next;
+        count += 1;
+    }
+    core::ptr::null_mut()
+}
+
+/// Title shown on the Training character select in team mode.
+const TEAM_TITLE: &str = "Team Training";
+/// The title the game set ("Training" in English), so it can be put back when team mode goes off.
+static TITLE_ORIGINAL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The text of a UTF-16 text box, or None when it can't be read safely.
+unsafe fn textbox_string(tb: &TextBox) -> Option<String> {
+    if tb.text_buf.is_null() || tb.is_utf8 || tb.text_len > tb.text_buf_len {
+        return None;
+    }
+    let chars = core::slice::from_raw_parts(tb.text_buf as *const u16, tb.text_len as usize);
+    Some(String::from_utf16_lossy(chars))
+}
+
+/// "Team Training" as the character select's title in team mode, the game's own title otherwise. Writes only
+/// when the text differs. The game's set_text_string grows the text buffer when the new text is longer (the
+/// title's holds 10 characters; it calls the text box's buffer allocation, vtable +232, before setting).
+unsafe fn update_title(team_mode: bool) {
+    let pane = TRAINING_TEXT_PANE;
+    if pane.is_null() {
+        return;
+    }
+    let tb = (*pane).as_textbox();
+    let current = match textbox_string(tb) {
+        Some(s) => s,
+        None => return,
+    };
+    let mut original = TITLE_ORIGINAL.lock().unwrap();
+    if current != TEAM_TITLE {
+        *original = Some(current.clone());
+    }
+    let want = if team_mode {
+        TEAM_TITLE
+    } else {
+        match original.as_deref() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if current != want {
+        tb.set_text_string(want);
+    }
+}
 
 /// Log immediate children of a pane (for diagnostics).
 unsafe fn dump_children(parent: *const Pane, label: &str) {
@@ -2061,19 +2125,16 @@ unsafe fn cache_css_panes(root_pane: *const Pane) {
     SPIRIT_BTN_PANES = [core::ptr::null_mut(); 4];
     NAMEPLATE_CONTAINER_PANES = [core::ptr::null_mut(); 4];
 
-    // Search for "Training" text pane — try common CSS text pane names.
+    // The "Training" title: the text box set_txt_title_00 directly under the "title" pane (read on 13.0.5
+    // hardware: text "Training", a 10-character buffer). Another set_txt_title_00 sits deeper, inside
+    // set_btn_02_title, Smash mode's Solo/Team Battle banner, which is hidden in Training.
     TRAINING_TEXT_PANE = core::ptr::null_mut();
-    for name in &["txt_rule_name", "txt_training", "txt_rule", "txt_mode",
-                   "txt_melee_type", "txt_title", "txt_melee"] {
-        let p = find_pane_by_name(root_pane, name);
-        if !p.is_null() {
-            TRAINING_TEXT_PANE = p;
-            debug_log(&format!("Found training text pane: '{}'", name));
-            break;
-        }
+    let title = find_pane_by_name(root_pane, "title");
+    if !title.is_null() {
+        TRAINING_TEXT_PANE = find_child_by_name(title, "set_txt_title_00");
     }
     if TRAINING_TEXT_PANE.is_null() {
-        debug_log("WARNING: could not find training text pane (tried common names)");
+        debug_log("WARNING: no title text pane (title/set_txt_title_00)");
     }
 
     // One-shot: dump full pane tree of chara_select_base root to find token/cursor panes.
@@ -2610,6 +2671,8 @@ pub unsafe fn css_btn_rule_draw(root_pane: &Pane, layout_name: &str) {
     // Keep vanilla is_team_battle() in sync during CSS.
     sync_team_battle_flag();
 
+    update_title(TEAM_MODE.load(Ordering::Relaxed));
+
     // The team flags and team colours aren't touched here: the game's Team Battle (DEFERRED_TEAM_BATTLE) shows
     // and hides the flags and plays team_color_N on the flag, panel, name plate and bar panes, as in Smash
     // mode. The mod used to draw its own (flags scaled 1.33, its own palette over the whole panel): measured
@@ -2838,21 +2901,39 @@ pub unsafe fn game_tick_hook(param_1: *mut u8) {
     call_original!(param_1);
     // Refresh medal/hand colors when a panel's team changed.
     refresh_medal_hand_colors();
+}
+
+/// Runs a pending "P2 becomes a CPU" (DEFERRED_P2_TOGGLE, set when X switches to solo) on the character
+/// select's MainThread update. It used to run in game_tick_hook, which never runs on the character select: P2
+/// stayed None, X back to team kept it None, and a match started with P1, P2 None and two CPUs crashed Smash
+/// in its first frames (data abort at main+0x156115c, P2's per-player object null; the April beta e28f0f2 too).
+/// The toggle also stayed pending until the next match's AI startup ran game_tick_hook, which then called
+/// state_toggle on the destroyed character select scene. SSBU Reversing Agent docs/TEAM_BATTLE.md.
+///
+/// It waits until P2's panel UI is set up (its +0x178, which state_toggle's redraw reads); after 300 frames
+/// without that it gives up and P2 stays None.
+unsafe fn apply_deferred_p2_toggle(scene_ptr: *mut u8) {
+    static WAITED: AtomicU32 = AtomicU32::new(0);
     if !DEFERRED_P2_TOGGLE.load(Ordering::Relaxed) {
+        WAITED.store(0, Ordering::Relaxed);
+        return;
+    }
+    // state_toggle(scene, entry, type) works on panel = entry+8 and redraws through the panel's UI at
+    // panel+0x5E8. The entry is one of the panel list at scene+0x250 (16 bytes each, as cache_panel_ptrs reads
+    // it). This used scene+0x238, whose entries point at small 0x40-byte objects, not panels (read on 13.0.5
+    // hardware): state_toggle then crashed in the redraw.
+    let vec_a_start = core::ptr::read_volatile(scene_ptr.add(0x250) as *const usize);
+    let panel = if vec_a_start == 0 { 0 } else { core::ptr::read_volatile((vec_a_start + 0x18) as *const usize) };
+    let ui = if panel == 0 { 0 } else { core::ptr::read_volatile((panel + 0x5E8) as *const usize) };
+    let ready = ui != 0 && core::ptr::read_volatile((ui + 0x178) as *const usize) != 0;
+    if !ready {
+        if WAITED.fetch_add(1, Ordering::Relaxed) >= 300 {
+            DEFERRED_P2_TOGGLE.store(false, Ordering::Relaxed);
+            debug_log("css_scene_update: P2 panel never got ready; P2 stays None");
+        }
         return;
     }
     DEFERRED_P2_TOGGLE.store(false, Ordering::Relaxed);
-    let scene = CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed);
-    if scene == 0 {
-        return;
-    }
-    let scene_ptr = scene as *mut u8;
-    let vec_a_start = core::ptr::read_volatile(
-        scene_ptr.add(0x238) as *const usize,
-    );
-    if vec_a_start == 0 {
-        return;
-    }
     let vec_entry_p2 = (vec_a_start + 0x10) as *mut u8;
     let text = skyline::hooks::getRegionAddress(
         skyline::hooks::Region::Text,
@@ -2867,16 +2948,18 @@ pub unsafe fn game_tick_hook(param_1: *mut u8) {
     if p2 != 0 {
         core::ptr::write_volatile((p2 as *mut u8).add(0x1C0), 0u8);
     }
-    debug_log("game_tick: deferred P2 state_toggle → CPU (MainThread)");
+    debug_log("css_scene_update: deferred P2 state_toggle → CPU (MainThread)");
 }
 
 /// The Training character select's MainThread work, after the scene's own update each frame: the native
-/// Team Battle switch, then the panels' teams into TEAM_COLORS and the medal/hand colours that follow them.
+/// Team Battle switch, P2 becoming a CPU after X to solo, then the panels' teams into TEAM_COLORS and the
+/// medal/hand colours that follow them.
 #[skyline::hook(offset = OFFSET_CSS_SCENE_UPDATE)]
 pub unsafe fn css_scene_update_hook(scene: *mut u8, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     let result = call_original!(scene, a1, a2, a3, a4);
     if scene as usize == CSS_TRAINING_SCENE_PTR.load(Ordering::Relaxed) {
         apply_deferred_team_battle();
+        apply_deferred_p2_toggle(scene);
         sync_team_colors_from_panels();
         refresh_medal_hand_colors();
     }
@@ -2922,6 +3005,8 @@ pub unsafe fn css_setup_hook(parent: *const u8, mode_params: *mut u8, data_buf: 
     // the new address. css_panel_layout_hook will re-populate it for training.
     CSS_TRAINING_SCENE_PTR.store(0, Ordering::Relaxed);
     TEAM_BATTLE_SCENE.store(0, Ordering::Relaxed);
+    // A pending P2 toggle belongs to the old scene.
+    DEFERRED_P2_TOGGLE.store(false, Ordering::Relaxed);
     // And force the draw hook to re-cache: the new scene can land at the old
     // scene's address, which would leave the cached panes pointing into the
     // destroyed layout.
