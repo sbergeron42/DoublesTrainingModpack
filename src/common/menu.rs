@@ -191,8 +191,6 @@ fn close_menu(app: &training_mod_tui::App<'static>) {
 pub fn spawn_menu() {
     assign(&QUICK_MENU_ACTIVE, true);
     let mut app = lock_write(&QUICK_MENU_APP);
-    app.page = AppPage::CPU_SETUP;
-    app.editing_profile_idx = None;
     app.cpu_profile_assign = read_with(&MENU, |m| m.cpu_profile_assign);
 
     // Detect which entries are CPUs vs human/nonexistent
@@ -205,9 +203,25 @@ pub fn spawn_menu() {
                 entry_id < num_entries && !crate::training::doubles::is_human_entry(entry_id);
         }
     }
-    app.snap_to_active_cpu();
+    app.open();
+    sync_profile_tabs(&mut app);
+    assign(&Y_CHORDED, true);
 
     assign(&MENU_RECEIVED_INPUT, true);
+}
+
+/// Make the profile tabs hold the profile of the CPU being edited: save the profile they held, load the new one.
+fn sync_profile_tabs(app: &mut training_mod_tui::App<'static>) {
+    let want = app.has_active_cpu().then(|| app.edit_profile());
+    if app.loaded_profile != want {
+        if let Some(old) = app.loaded_profile {
+            save_profile_from_tabs(app, old);
+        }
+        if let Some(new) = want {
+            load_profile_into_tabs(app, new);
+        }
+        app.loaded_profile = want;
+    }
 }
 
 #[derive(Eq, PartialEq, Hash, Copy, Clone)]
@@ -244,6 +258,9 @@ static DIRECTION_HOLD_FRAMES: LazyLock<RwLock<HashMap<DirectionButton, u32>>> =
         ]))
     });
 pub static MENU_RECEIVED_INPUT: RwLock<bool> = RwLock::new(true);
+/// Y was held together with a shoulder button (a chord), so its own action is skipped when it is released.
+/// Starts true so a Y already held when the menu opens does nothing.
+static Y_CHORDED: RwLock<bool> = RwLock::new(true);
 
 pub static MENU_CLOSE_FRAME_COUNTER: LazyLock<usize> =
     LazyLock::new(|| frame_counter::register_counter(frame_counter::FrameCounterType::Real));
@@ -339,56 +356,84 @@ pub unsafe fn handle_final_input_mapping(
 
             let mut app = lock_write(&QUICK_MENU_APP);
             button_config::button_mapping(ButtonConfig::A, style, button_presses).then(|| {
-                let on_cpu_setup = app.page == AppPage::CPU_SETUP;
                 app.on_a();
-                // If we just entered profile editing, load profile data into tabs
-                if let Some(idx) = app.editing_profile_idx {
-                    if on_cpu_setup {
-                        load_profile_into_tabs(&mut app, idx);
-                    }
-                }
                 received_input = true;
             });
             button_config::button_mapping(ButtonConfig::B, style, button_presses).then(|| {
-                let was_editing = app.editing_profile_idx;
                 received_input = true;
                 app.on_b();
-                // If we just exited profile editing, save profile data
-                if let Some(profile_idx) = was_editing {
-                    if app.editing_profile_idx.is_none() {
-                        save_profile_from_tabs(&app, profile_idx);
-                    }
-                }
-                if app.page == AppPage::CLOSE {
-                    // Write cpu_profile_assign back to MENU before saving
-                    {
-                        let mut menu = lock_write(&MENU);
-                        menu.cpu_profile_assign = app.cpu_profile_assign;
-                    }
-                    close_menu(&app);
-                }
             });
             button_config::button_mapping(ButtonConfig::X, style, button_presses).then(|| {
                 app.on_x();
                 received_input = true;
             });
-            button_config::button_mapping(ButtonConfig::Y, style, button_presses).then(|| {
-                app.on_y();
-                received_input = true;
-            });
 
-            button_config::button_mapping(ButtonConfig::ZL, style, button_presses).then(|| {
-                app.on_zl();
-                received_input = true;
-            });
-            button_config::button_mapping(ButtonConfig::ZR, style, button_presses).then(|| {
-                app.on_zr();
-                received_input = true;
-            });
-            button_config::button_mapping(ButtonConfig::R, style, button_presses).then(|| {
-                app.on_r();
-                received_input = true;
-            });
+            // Y clears a weighted option when released, unless it was held for a chord (Y+R reset on a Pro
+            // Controller, Y+L/R switch CPU on a GameCube controller).
+            let y_held = button_config::button_mapping(ButtonConfig::Y, style, button_current_held);
+            if button_config::button_mapping(ButtonConfig::Y, style, button_presses) {
+                assign(&Y_CHORDED, false);
+            }
+            let mut chord = false;
+            if style == ControllerStyle::GCController {
+                // L/R switch tabs, Y+L/R switch CPU, Z resets
+                button_config::button_mapping(ButtonConfig::ZL, style, button_presses).then(|| {
+                    if y_held {
+                        chord = true;
+                        app.switch_cpu(-1);
+                    } else {
+                        app.on_zl();
+                    }
+                    received_input = true;
+                });
+                button_config::button_mapping(ButtonConfig::ZR, style, button_presses).then(|| {
+                    if y_held {
+                        chord = true;
+                        app.switch_cpu(1);
+                    } else {
+                        app.on_zr();
+                    }
+                    received_input = true;
+                });
+                button_config::button_mapping(ButtonConfig::R, style, button_presses).then(|| {
+                    app.on_r();
+                    received_input = true;
+                });
+            } else {
+                // ZL/ZR switch tabs, L/R switch CPU, Y+R resets
+                button_config::button_mapping(ButtonConfig::ZL, style, button_presses).then(|| {
+                    app.on_zl();
+                    received_input = true;
+                });
+                button_config::button_mapping(ButtonConfig::ZR, style, button_presses).then(|| {
+                    app.on_zr();
+                    received_input = true;
+                });
+                button_config::button_mapping(ButtonConfig::L, style, button_presses).then(|| {
+                    chord |= y_held;
+                    app.on_l();
+                    received_input = true;
+                });
+                button_config::button_mapping(ButtonConfig::R, style, button_presses).then(|| {
+                    if y_held {
+                        chord = true;
+                        app.on_r();
+                    } else {
+                        app.switch_cpu(1);
+                    }
+                    received_input = true;
+                });
+            }
+            if chord {
+                assign(&Y_CHORDED, true);
+            }
+            if button_config::button_mapping(ButtonConfig::Y, style, p1_controller.just_release) {
+                if !read(&Y_CHORDED) {
+                    app.on_y();
+                    received_input = true;
+                }
+                assign(&Y_CHORDED, true);
+            }
 
             let hold_condition = |direction_button| {
                 direction_hold_frames[direction_button] > DIRECTION_HOLD_REPEAT_FRAMES
@@ -427,6 +472,18 @@ pub unsafe fn handle_final_input_mapping(
             });
 
             if received_input {
+                sync_profile_tabs(&mut app);
+                if app.page == AppPage::CLOSE {
+                    // Save the profile being edited and each CPU's profile choice, then close
+                    if let Some(idx) = app.loaded_profile {
+                        save_profile_from_tabs(&app, idx);
+                    }
+                    {
+                        let mut menu = lock_write(&MENU);
+                        menu.cpu_profile_assign = app.cpu_profile_assign;
+                    }
+                    close_menu(&app);
+                }
                 direction_hold_frames.iter_mut().for_each(|(_, f)| *f = 0);
                 assign(&MENU_RECEIVED_INPUT, true);
             }
