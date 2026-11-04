@@ -1,8 +1,7 @@
 # Doubles Training Modpack
 
 A fork of the [Ultimate Training Modpack](https://github.com/jugeeya/UltimateTrainingModpack) that turns Smash
-Ultimate's Training mode into a doubles lab: up to four fighters, any mix of humans and CPUs, on teams, with
-every CPU set up on its own.
+Ultimate's Training mode into a doubles lab: up to four fighters, any mix of humans and up to 3 CPUs.
 
 **[Latest release](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest)**
 (`libdubs_training_modpack.nro`). See [Installation](#installation).
