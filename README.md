@@ -55,6 +55,23 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 
 Each CPU uses one of eight profiles (Mash, Override and Defensive tabs).
 
+<a name="features"/>
+
+# Training Modpack features
+
+Everything from the Ultimate Training Modpack is included. Its
+[README](https://github.com/jugeeya/UltimateTrainingModpack#readme) has screenshots, every option and the FAQ.
+
+- **Mash, follow-up and defensive options** (set per CPU here): triggers, aerial delay, fast fall, DI, SDI,
+  air dodge, ledge, tech, shield and more.
+- **Save states** (default `ZL` + `D-Pad Down` to save, `ZL` + `D-Pad Up` to load):
+  - five slots, mirroring and randomized damage;
+  - charge levels, buffs and character items.
+- **Input recording** (`ZR` + `D-Pad Down` to record, `ZR` + `D-Pad Up` to play back), usable as a CPU option.
+- **Misc:** hitbox visualization, frame advantage, input delay, stage hazards on/off, HUD toggle.
+- **Menu use:** when several options are picked, one is chosen at random. `X` saves the current settings as your
+  defaults.
+
 # Installation
 
 You need [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere/releases) and
@@ -77,23 +94,6 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 - Not yet able to co-exist with Jugeeya's Ultimate Training Modpack. WIP.
 - Some features haven't been tested/scaled to 4 players, like character items.
 - Experimental/doubles-native features TBD (open to feedback!)
-
-<a name="features"/>
-
-# Training Modpack features
-
-Everything from the Ultimate Training Modpack is included. Its
-[README](https://github.com/jugeeya/UltimateTrainingModpack#readme) has screenshots, every option and the FAQ.
-
-- **Mash, follow-up and defensive options** (set per CPU here): triggers, aerial delay, fast fall, DI, SDI,
-  air dodge, ledge, tech, shield and more.
-- **Save states** (default `ZL` + `D-Pad Down` to save, `ZL` + `D-Pad Up` to load):
-  - five slots, mirroring and randomized damage;
-  - charge levels, buffs and character items.
-- **Input recording** (`ZR` + `D-Pad Down` to record, `ZR` + `D-Pad Up` to play back), usable as a CPU option.
-- **Misc:** hitbox visualization, frame advantage, input delay, stage hazards on/off, HUD toggle.
-- **Menu use:** when several options are picked, one is chosen at random. `X` saves the current settings as your
-  defaults.
 
 <a name="build"/>
 
