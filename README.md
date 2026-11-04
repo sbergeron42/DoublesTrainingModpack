@@ -17,14 +17,12 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 
 # Doubles features
 
+## Team Training CSS
 <p align="center">
 <img src="./photos/doubles/team-css.jpg" width="640">
 </p>
 
-## Team Training CSS
-
-- `X` to toggle between Training and Team Training. Teams work like in Smash mode's Team Battle.
-- Four panels on the Training character select: P2, P3 and P4 can each be a human or a CPU.
+<p align="center"><i>`X` to toggle between Training and Team Training. Teams work like in Smash mode's Team Battle.</i></p>
 
 ## In the match
 
