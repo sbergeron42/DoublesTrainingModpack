@@ -46,7 +46,7 @@ split them into teams, and give every CPU its own settings.
   - Teammates don't push each other around and can't footstool each other.
 - **Team Attack.** On by default, as in competitive doubles: teammates can hit each other. Turn it off in the
   modpack menu's Doubles Settings.
-- **Each CPU plays at its own level.** A Lv. 9 Zelda and a Lv. 1 Wolf really play at Lv. 9 and Lv. 1.
+- **CPU-specific difficulty levels** A Lv. 9 Zelda and a Lv. 1 Wolf play at Lv. 9 and Lv. 1.
 - **Every human on their own controller.** P2 (and P3 or P4) use whichever controller picked them on character
   select.
 
