@@ -40,11 +40,7 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
   - **Player Damage %** sets P1 to P4. It replaces CPU Damage % and P1 Damage % in vanilla Ultimate.
   - **CPU Behavior** is set per CPU, with same options as vanilla: 'Stop', 'Walk', 'Lvl (n)', etc.
 
-## Modpack Menu Options
-
-Hold `D-Pad Up` and press `B`, or hold `Start`. Reset is `Y` + `R` (`Z` on GameCube).
-
-### CPU Profiles
+## CPU Profiles
 
 <p align="center">
 <img src="./photos/doubles/cpu-profiles.gif" width="640">
@@ -55,7 +51,7 @@ Hold `D-Pad Up` and press `B`, or hold `Start`. Reset is `Y` + `R` (`Z` on GameC
 
 Each CPU uses one of eight profiles (Mash, Override and Defensive tabs).
 
-### Doubles Settings
+## Doubles Settings
 
 <p align="center">
 <img src="./photos/doubles/doubles-settings.jpg" width="640">
