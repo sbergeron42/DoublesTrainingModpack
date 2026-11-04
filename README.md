@@ -47,7 +47,7 @@ Hold `D-Pad Up` and press `B`, or hold `Start`. Reset is `Y` + `R` (`Z` on GameC
 ### CPU Profiles
 
 <p align="center">
-<img src="./photos/doubles/cpu-profiles.jpg" width="640">
+<img src="./photos/doubles/cpu-profiles.gif" width="640">
 </p>
 
 <p align="center"><i>Up to the title, then Left / Right to change profile, even inside a setting.
