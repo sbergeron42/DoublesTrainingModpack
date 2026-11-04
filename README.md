@@ -50,7 +50,7 @@ Hold `D-Pad Up` and press `B`, or hold `Start`. Reset is `Y` + `R` (`Z` on GameC
 <img src="./photos/doubles/cpu-profiles.gif" width="640">
 </p>
 
-<p align="center"><i>Up to the title, then Left / Right to change profile, even inside a setting.
+<p align="center"><i>Up to the title, then Left / Right to change profile.
 <code>L</code> / <code>R</code> switch CPU (<code>Y</code> + <code>L</code> / <code>R</code> on GameCube).</i></p>
 
 Each CPU uses one of eight profiles (Mash, Override and Defensive tabs).
@@ -77,7 +77,7 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
 <a name="compatibility"/>
 
-# Compatiblility/Limitations
+# Compatibility/Limitations
 
 - **Tested on Smash Ultimate 13.0.5.**
 - Not yet able to co-exist with Jugeeya's Ultimate Training Modpack. WIP.
