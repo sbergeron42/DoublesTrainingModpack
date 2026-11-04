@@ -4,8 +4,7 @@ use skyline::nn::ui2d::*;
 use smash::ui2d::SmashPane;
 use crate::common::text_box::SmashTextBox;
 use training_mod_tui::{
-    App, AppPage, ConfirmationState, SliderState, MAX_CPU_SLOTS, NX_SUBMENU_COLUMNS,
-    NX_SUBMENU_ROWS,
+    App, AppPage, ConfirmationState, SliderState, NX_SUBMENU_COLUMNS, NX_SUBMENU_ROWS,
 };
 
 use crate::common::menu::{
@@ -85,7 +84,186 @@ static PROCON_BUTTON_MAPPING: LazyLock<HashMap<&'static str, u16>> = LazyLock::n
     ])
 });
 
-unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
+/// The title's text colors as the layout has them, read the first time the title is drawn.
+static TITLE_COLORS: RwLock<Option<[[[u8; 4]; 2]; 2]>> = RwLock::new(None);
+
+// The key help bar, in 1080p screen pixels, measured on 13.0.5 (English) with the parts at their 1.25 scale. A
+// part's icon ends, and its text starts, KEY_HELP_ANCHOR right of the part's own x (screen x = 960 + part x).
+// Icons grow left from there. Text longer than KEY_HELP_TEXT_MAX_W is squeezed to that width; shorter text, and
+// its icon with it, sits half the difference further right.
+const KEY_HELP_ANCHOR: f32 = 37.0;
+const KEY_HELP_GLYPH_W: f32 = 48.0;
+const KEY_HELP_SLASH_W: f32 = 26.0;
+const KEY_HELP_PLUS_W: f32 = 36.0;
+const KEY_HELP_UPPER_W: f32 = 26.0;
+const KEY_HELP_LOWER_W: f32 = 18.5;
+const KEY_HELP_SPACE_W: f32 = 9.0;
+const KEY_HELP_TEXT_MAX_W: f32 = 150.0;
+const KEY_HELP_GAP: f32 = 40.0;
+const KEY_HELP_RIGHT_EDGE: f32 = 1900.0;
+
+/// One key help right of the tabs: its part, icon glyphs, and its title with a shorter one for a full bar.
+struct KeyHelp {
+    name: &'static str,
+    glyphs: Vec<u16>,
+    title: &'static str,
+    short: &'static str,
+}
+
+fn key_help_icon_w(glyphs: &[u16]) -> f32 {
+    glyphs
+        .iter()
+        .map(|&g| match g {
+            0x2F => KEY_HELP_SLASH_W,
+            0x2B => KEY_HELP_PLUS_W,
+            _ => KEY_HELP_GLYPH_W,
+        })
+        .sum()
+}
+
+fn key_help_text_w(text: &str) -> f32 {
+    text.chars()
+        .map(|c| match c {
+            ' ' => KEY_HELP_SPACE_W,
+            c if c.is_ascii_uppercase() => KEY_HELP_UPPER_W,
+            _ => KEY_HELP_LOWER_W,
+        })
+        .sum::<f32>()
+        .min(KEY_HELP_TEXT_MAX_W)
+}
+
+/// Set a key help part's icon glyphs (as UTF-16, the way set_icon_text does) and text.
+unsafe fn set_key_help_text(part: &mut Pane, glyphs: &[u16], title: &str) {
+    let icon = part.find_pane_by_name_recursive_expect("set_txt_icon");
+    icon.set_visible(true);
+    let icon_tb = icon.as_textbox();
+    // A placeholder of the same length makes sure the text buffer holds every glyph
+    icon_tb.set_text_string(&"-".repeat(glyphs.len()));
+    if icon_tb.text_len as usize == glyphs.len() {
+        set_icon_text(icon_tb, glyphs);
+    } else {
+        set_icon_text(icon_tb, &glyphs[glyphs.len() - 1..]);
+    }
+    part.find_pane_by_name_recursive_expect("set_txt_help")
+        .as_textbox()
+        .set_text_string(title);
+}
+
+/// Lay out `items` left to right from screen x `start`, hiding the parts in `hidden`. When the bar would run off
+/// the screen, titles switch to their short form, in the order given by `shorten_first` (indices into `items`).
+unsafe fn layout_key_helps(
+    root_pane: &Pane,
+    start: f32,
+    items: &[KeyHelp],
+    shorten_first: &[usize],
+    hidden: &[&'static str],
+) {
+    for name in hidden {
+        root_pane.find_pane_by_name_recursive_expect(name).set_visible(false);
+    }
+    let mut titles: Vec<&str> = items.iter().map(|k| k.title).collect();
+    let end = |titles: &[&str]| {
+        start
+            + items
+                .iter()
+                .zip(titles)
+                .map(|(k, t)| KEY_HELP_GAP + key_help_icon_w(&k.glyphs) + key_help_text_w(t))
+                .sum::<f32>()
+    };
+    for &i in shorten_first {
+        if end(&titles) <= KEY_HELP_RIGHT_EDGE {
+            break;
+        }
+        titles[i] = items[i].short;
+    }
+    let mut x = start;
+    for (k, title) in items.iter().zip(titles) {
+        let (icon_w, text_w) = (key_help_icon_w(&k.glyphs), key_help_text_w(title));
+        let left = x + KEY_HELP_GAP;
+        let anchor = left + icon_w - (KEY_HELP_TEXT_MAX_W - text_w) / 2.0;
+        let part = root_pane.find_pane_by_name_recursive_expect(k.name);
+        part.set_visible(true);
+        part.pos_x = anchor - KEY_HELP_ANCHOR - 960.0;
+        part.flags |= 1 << PaneFlag::IsGlobalMatrixDirty as u8;
+        set_key_help_text(part, &k.glyphs, title);
+        x = left + icon_w + text_w;
+    }
+}
+
+/// The menu title: "Modpack Menu" on the root tabs; on the profile tabs the CPU being edited and its profile,
+/// with arrows and in yellow while the header is selected (Left/Right change the profile).
+unsafe fn draw_title(app: &App, root_pane: &Pane) {
+    let Some(title) = root_pane.find_pane_by_name_recursive("TrModTitle") else {
+        return;
+    };
+    let focused = app.page == AppPage::PROFILE;
+    let text = if app.editing_profile_idx.is_some() {
+        let profile = if focused {
+            format!("< Profile {} >", app.edit_profile() + 1)
+        } else {
+            format!("Profile {}", app.edit_profile() + 1)
+        };
+        format!("P{} \u{b7} {}", app.edit_cpu + 2, profile)
+    } else {
+        "Modpack Menu".to_string()
+    };
+    let names = ["set_txt_00", "set_txt_01"];
+    let panes: Vec<&mut TextBox> = names
+        .iter()
+        .filter_map(|n| title.find_pane_by_name_recursive(n))
+        .map(|p| p.as_textbox())
+        .collect();
+    if panes.len() == names.len() && read(&TITLE_COLORS).is_none() {
+        assign(&TITLE_COLORS, Some([panes[0].text_colors, panes[1].text_colors]));
+    }
+    let colors = read(&TITLE_COLORS);
+    for (i, pane) in panes.into_iter().enumerate() {
+        pane.set_text_string(&text);
+        if focused {
+            pane.set_color(255, 255, 0, 255);
+        } else if let Some(c) = colors {
+            let [r, g, b, a] = c[i][0];
+            pane.set_color(r, g, b, a);
+            pane.text_colors = c[i];
+        }
+    }
+}
+
+/// The CPUs that share the edited CPU's profile, as "P4" or "P3 and P4".
+fn shared_with_text(app: &App) -> String {
+    let names: Vec<String> = app
+        .profile_shared_with()
+        .iter()
+        .map(|i| format!("P{}", i + 2))
+        .collect();
+    names.join(" and ")
+}
+
+/// The header is selected: the buttons, or the setting it was selected from, show without a highlight and the
+/// footer says what Left/Right do, and which other CPUs use the same profile.
+unsafe fn render_profile_header_page(app: &mut App, root_pane: &Pane) {
+    match app.profile_return_page {
+        AppPage::TOGGLE => render_toggle_page(app, root_pane, false),
+        AppPage::SLIDER => render_slider_page(app, root_pane, false),
+        _ => render_submenu_page(app, root_pane, false),
+    }
+    let player = app.edit_cpu + 2;
+    let shared = shared_with_text(app);
+    let help = if shared.is_empty() {
+        format!("Left/Right: choose the profile P{player} uses.")
+    } else {
+        format!(
+            "Left/Right: choose the profile P{player} uses. Profile {} is also used by {shared}.",
+            app.edit_profile() + 1
+        )
+    };
+    root_pane
+        .find_pane_by_name_recursive_expect("FooterTxt")
+        .as_textbox()
+        .set_text_string(&help);
+}
+
+unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane, highlight: bool) {
     let root_tabs_clone = app.tabs.clone();
     let profile_tabs_clone = app.profile_tabs.clone();
     let tab = app.selected_tab();
@@ -105,7 +283,8 @@ unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
                     .find_pane_by_name_recursive_expect("TitleBg")
                     .as_picture();
                 let title_bg_material = &mut *title_bg.material;
-                let is_selected = row == tab.submenus.state.selected_row().unwrap()
+                let is_selected = highlight
+                    && row == tab.submenus.state.selected_row().unwrap()
                     && col == tab.submenus.state.selected_col().unwrap();
 
                 // Set Pane Visibility
@@ -174,10 +353,17 @@ unsafe fn render_submenu_page(app: &mut App, root_pane: &Pane) {
     }
 }
 
-unsafe fn render_toggle_page(app: &mut App, root_pane: &Pane) {
+unsafe fn render_toggle_page(app: &mut App, root_pane: &Pane, highlight: bool) {
     let root_tabs_clone = app.tabs.clone();
     let profile_tabs_clone = app.profile_tabs.clone();
     let submenu = app.selected_submenu();
+    if highlight {
+        // The setting's help, also after the profile header or a reset prompt changed the footer
+        root_pane
+            .find_pane_by_name_recursive_expect("FooterTxt")
+            .as_textbox()
+            .set_text_string(submenu.help_text);
+    }
     // If the options can only be toggled on or off, then use the check icon
     // instead of the number icons
     let use_check_icon = submenu.toggles.get(0, 0).unwrap().max == 1;
@@ -197,7 +383,8 @@ unsafe fn render_toggle_page(app: &mut App, root_pane: &Pane) {
                     .find_pane_by_name_recursive_expect("TitleBg")
                     .as_picture();
                 let title_bg_material = &mut *title_bg.material;
-                let is_selected = row == submenu.toggles.state.selected_row().unwrap()
+                let is_selected = highlight
+                    && row == submenu.toggles.state.selected_row().unwrap()
                     && col == submenu.toggles.state.selected_col().unwrap();
 
                 if is_selected {
@@ -256,9 +443,19 @@ unsafe fn render_toggle_page(app: &mut App, root_pane: &Pane) {
     }
 }
 
-unsafe fn render_slider_page(app: &mut App, root_pane: &Pane) {
+unsafe fn render_slider_page(app: &mut App, root_pane: &Pane, highlight: bool) {
     let submenu = app.selected_submenu();
-    let slider = submenu.slider.unwrap();
+    let mut slider = submenu.slider.unwrap();
+    if highlight {
+        // The setting's help, also after the profile header or a reset prompt changed the footer
+        root_pane
+            .find_pane_by_name_recursive_expect("FooterTxt")
+            .as_textbox()
+            .set_text_string(submenu.help_text);
+    } else {
+        // Drawn under the selected header: neither handle shows as hovered
+        slider.state = SliderState::None;
+    }
     let selected_min = slider.lower;
     let selected_max = slider.upper;
 
@@ -438,83 +635,6 @@ unsafe fn render_confirmation_page(app: &mut App, root_pane: &Pane) {
     }
 }
 
-unsafe fn render_cpu_setup_page(app: &mut App, root_pane: &Pane) {
-    // Build list of active CPU entry indices (0-based, entry_id = idx+1)
-    let active_entries: Vec<usize> = (0..MAX_CPU_SLOTS)
-        .filter(|&i| app.cpu_is_active[i])
-        .collect();
-
-    let mut visible_row = 0usize;
-    for row in 0..NX_SUBMENU_ROWS {
-        let menu_button_row = root_pane
-            .find_pane_by_name_recursive_expect(format!("TrModMenuButtonRow{row}").as_str());
-
-        if visible_row < active_entries.len() && row == visible_row {
-            let entry_idx = active_entries[visible_row];
-            menu_button_row.set_visible(true);
-            for col in 0..NX_SUBMENU_COLUMNS {
-                let menu_button = menu_button_row
-                    .find_pane_by_name_recursive_expect(format!("Button{col}").as_str());
-                if col == 0 {
-                    menu_button.set_visible(true);
-                    let title_text = menu_button
-                        .find_pane_by_name_recursive_expect("TitleTxt")
-                        .as_textbox();
-                    let title_bg = menu_button
-                        .find_pane_by_name_recursive_expect("TitleBg")
-                        .as_picture();
-                    let title_bg_material = &mut *title_bg.material;
-
-                    let player_num = entry_idx + 2; // entry 0 = P2, entry 1 = P3, etc.
-                    let profile_idx = app.cpu_profile_assign[entry_idx];
-                    title_text.set_text_string(
-                        &format!("Player {} CPU: Profile {}", player_num, profile_idx + 1),
-                    );
-
-                    let is_selected = entry_idx == app.cpu_setup_row;
-                    if is_selected {
-                        title_bg_material.set_white_res_color(BG_LEFT_ON_WHITE_COLOR);
-                        title_bg_material.set_black_res_color(BG_LEFT_ON_BLACK_COLOR);
-                        title_text.text_shadow_enable(true);
-                        title_text.text_outline_enable(true);
-                        title_text.set_color(255, 255, 255, 255);
-                    } else {
-                        title_bg_material.set_white_res_color(BG_LEFT_OFF_WHITE_COLOR);
-                        title_bg_material.set_black_res_color(BG_LEFT_OFF_BLACK_COLOR);
-                        title_text.text_shadow_enable(false);
-                        title_text.text_outline_enable(false);
-                        title_text.set_color(178, 199, 211, 255);
-                    }
-
-                    // Hide icons
-                    menu_button
-                        .find_pane_by_name_recursive_expect("check")
-                        .set_visible(false);
-                    menu_button
-                        .find_pane_by_name_recursive_expect("Icon")
-                        .set_visible(false);
-                } else {
-                    menu_button.set_visible(false);
-                }
-            }
-            visible_row += 1;
-        } else {
-            menu_button_row.set_visible(false);
-        }
-    }
-
-    // Help text
-    let help = if active_entries.is_empty() {
-        "No CPUs detected | B Close"
-    } else {
-        "A Edit Profile | Left/Right Change Profile | B Close"
-    };
-    root_pane
-        .find_pane_by_name_recursive_expect("FooterTxt")
-        .as_textbox()
-        .set_text_string(help);
-}
-
 pub unsafe fn draw(root_pane: &Pane) {
     // Determine if we're in the menu by seeing if the "help" footer has
     // begun moving upward. It starts at -80 and moves to 0 over 10 frames
@@ -539,14 +659,6 @@ pub unsafe fn draw(root_pane: &Pane) {
         return;
     } else {
         assign(&MENU_RECEIVED_INPUT, false);
-    }
-
-    if let Some(quit_button) = root_pane.find_pane_by_name_recursive("TrModTitle") {
-        for quit_txt_s in &["set_txt_00", "set_txt_01"] {
-            if let Some(quit_txt) = quit_button.find_pane_by_name_recursive(quit_txt_s) {
-                quit_txt.as_textbox().set_text_string("Modpack Menu");
-            }
-        }
     }
 
     // Make all invisible first
@@ -584,56 +696,8 @@ pub unsafe fn draw(root_pane: &Pane) {
     let mut app = lock_write(&QUICK_MENU_APP);
     // We don't really need to change anything, but get_before_selected requires &mut self
 
-    let tab_titles = if app.page == AppPage::CPU_SETUP {
-        // CPU Setup is the "current tab", root tabs adjacent
-        let last_root = app.tabs.items.last().map(|t| t.title).unwrap_or("");
-        let first_root = app.tabs.items.first().map(|t| t.title).unwrap_or("");
-        [last_root, "CPU Setup", first_root]
-    } else if app.editing_profile_idx.is_some() {
-        // Profile editing: show profile tab names
-        let before = app
-            .profile_tabs
-            .get_before_selected()
-            .map(|t| t.title)
-            .unwrap_or("");
-        let current_title = app
-            .profile_tabs
-            .get_selected()
-            .map(|t| t.title)
-            .unwrap_or("");
-        let after = app
-            .profile_tabs
-            .get_after_selected()
-            .map(|t| t.title)
-            .unwrap_or("");
-        [before, current_title, after]
-    } else {
-        // Root tabs, with CPU Setup as wrap-around
-        let at_first = app.tabs.state.selected() == Some(0);
-        let at_last = app.tabs.state.selected() == Some(app.tabs.items.len() - 1);
-        let before = if at_first {
-            "CPU Setup"
-        } else {
-            app.tabs
-                .get_before_selected()
-                .map(|t| t.title)
-                .unwrap_or("")
-        };
-        let current_title = app
-            .tabs
-            .get_selected()
-            .map(|t| t.title)
-            .unwrap_or("");
-        let after = if at_last {
-            "CPU Setup"
-        } else {
-            app.tabs
-                .get_after_selected()
-                .map(|t| t.title)
-                .unwrap_or("")
-        };
-        [before, current_title, after]
-    };
+    draw_title(&app, root_pane);
+    let tab_titles = app.tab_titles();
 
     let is_gcc = read(&P1_CONTROLLER_STYLE) == ControllerStyle::GCController;
     let button_mapping = if is_gcc {
@@ -652,10 +716,24 @@ pub unsafe fn draw(root_pane: &Pane) {
         button_mapping.get("Z"),
     );
 
-    let (left_tab_key, right_tab_key, save_defaults_key, reset_key, clear_toggle_key) = if is_gcc {
-        (l_key, r_key, x_key, z_key, y_key)
+    let (left_tab_key, right_tab_key, save_defaults_key, clear_toggle_key) = if is_gcc {
+        (l_key, r_key, x_key, y_key)
     } else {
-        (zl_key, zr_key, x_key, r_key, y_key)
+        (zl_key, zr_key, x_key, y_key)
+    };
+    // Reset is Z on a GameCube controller and Y+R on a Pro Controller (R alone switches CPU there). Switch CPU
+    // is Y+L/R on a GameCube controller and L/R on a Pro Controller.
+    let plus = b'+' as u16;
+    let slash = b'/' as u16;
+    let reset_glyphs: Vec<u16> = if is_gcc {
+        vec![*z_key.unwrap()]
+    } else {
+        vec![*y_key.unwrap(), plus, *r_key.unwrap()]
+    };
+    let switch_cpu_glyphs: Vec<u16> = if is_gcc {
+        vec![*y_key.unwrap(), plus, *l_key.unwrap(), slash, *r_key.unwrap()]
+    } else {
+        vec![*l_key.unwrap(), slash, *r_key.unwrap()]
     };
 
     [
@@ -690,68 +768,66 @@ pub unsafe fn draw(root_pane: &Pane) {
         help_pane.set_text_string(tab_titles[idx]);
     });
 
-    // Save Defaults Keyhelp
-    let name = "SaveDefaults";
-    let key = save_defaults_key;
-    let title = "Save Defaults";
-    let key_help_pane = root_pane.find_pane_by_name_recursive_expect(name);
-    let icon_pane = key_help_pane
-        .find_pane_by_name_recursive_expect("set_txt_icon")
-        .as_textbox();
-    set_icon_text(icon_pane, &[*key.unwrap()]);
-    key_help_pane
-        .find_pane_by_name_recursive_expect("set_txt_help")
-        .as_textbox()
-        .set_text_string(title);
-
-    // Reset Keyhelp
-    let name = "ResetDefaults";
-    let key = reset_key;
-    let title = match app.page {
-        AppPage::CPU_SETUP => "",
-        AppPage::SUBMENU => "Reset All",
-        AppPage::SLIDER => "Reset Current",
-        AppPage::TOGGLE => "Reset Current",
-        AppPage::CONFIRMATION => "",
-        AppPage::CLOSE => "",
-    };
-    if !title.is_empty() {
-        let key_help_pane = root_pane.find_pane_by_name_recursive_expect(name);
-        let icon_pane = key_help_pane
-            .find_pane_by_name_recursive_expect("set_txt_icon")
-            .as_textbox();
-        set_icon_text(icon_pane, &[*key.unwrap()]);
-        key_help_pane
-            .find_pane_by_name_recursive_expect("set_txt_help")
-            .as_textbox()
-            .set_text_string(title);
-    }
-
-    // Clear Toggle Keyhelp
-    let name = "ClearToggle";
-    let key_help_pane = root_pane.find_pane_by_name_recursive_expect(name);
-    let icon_pane = key_help_pane.find_pane_by_name_recursive_expect("set_txt_icon");
-    if app.should_show_clear_keyhelp() {
-        // This is only displayed when you're in a multiple selection toggle menu w/ toggle.max > 1
-        let key = clear_toggle_key;
-        let title = "Clear Toggle";
-        set_icon_text(icon_pane.as_textbox(), &[*key.unwrap()]);
-        key_help_pane
-            .find_pane_by_name_recursive_expect("set_txt_help")
-            .as_textbox()
-            .set_text_string(title);
-        icon_pane.set_visible(true);
-        key_help_pane.set_visible(true);
+    // Right of the tabs: Save Defaults (root tabs) or Switch CPU (profile tabs, two CPUs or more, not while
+    // confirming a reset), Reset, and Clear Toggle in a weighted toggle menu
+    let mut items: Vec<KeyHelp> = Vec::new();
+    let mut hidden: Vec<&'static str> = Vec::new();
+    if app.editing_profile_idx.is_none() {
+        items.push(KeyHelp {
+            name: "SaveDefaults",
+            glyphs: vec![*save_defaults_key.unwrap()],
+            title: "Save Defaults",
+            short: "Save",
+        });
+    } else if app.active_cpu_count() > 1 && app.page != AppPage::CONFIRMATION {
+        items.push(KeyHelp {
+            name: "SaveDefaults",
+            glyphs: switch_cpu_glyphs,
+            title: "Switch CPU",
+            short: "CPU",
+        });
     } else {
-        icon_pane.set_visible(false);
-        key_help_pane.set_visible(false);
+        hidden.push("SaveDefaults");
     }
+    let reset_title = match app.page {
+        AppPage::SUBMENU => Some(("Reset All", "Reset")),
+        AppPage::SLIDER | AppPage::TOGGLE => Some(("Reset Current", "Reset")),
+        AppPage::PROFILE | AppPage::CONFIRMATION | AppPage::CLOSE => None,
+    };
+    match reset_title {
+        Some((title, short)) => items.push(KeyHelp {
+            name: "ResetDefaults",
+            glyphs: reset_glyphs,
+            title,
+            short,
+        }),
+        None => hidden.push("ResetDefaults"),
+    }
+    if app.should_show_clear_keyhelp() {
+        // Only in a multiple selection toggle menu with toggle.max > 1
+        items.push(KeyHelp {
+            name: "ClearToggle",
+            glyphs: vec![*clear_toggle_key.unwrap()],
+            title: "Clear Toggle",
+            short: "Clear",
+        });
+    } else {
+        hidden.push("ClearToggle");
+    }
+    let reset_idx = items.iter().position(|k| k.name == "ResetDefaults");
+    let shorten_first: Vec<usize> = reset_idx
+        .into_iter()
+        .chain(0..items.len())
+        .collect();
+    // After the right tab's title at its longest, so the key helps stay put from tab to tab
+    let start = 960.0 + KEY_HELP_ANCHOR + KEY_HELP_TEXT_MAX_W;
+    layout_key_helps(root_pane, start, &items, &shorten_first, &hidden);
 
     match app.page {
-        AppPage::CPU_SETUP => render_cpu_setup_page(&mut app, root_pane),
-        AppPage::SUBMENU => render_submenu_page(&mut app, root_pane),
-        AppPage::SLIDER => render_slider_page(&mut app, root_pane),
-        AppPage::TOGGLE => render_toggle_page(&mut app, root_pane),
+        AppPage::PROFILE => render_profile_header_page(&mut app, root_pane),
+        AppPage::SUBMENU => render_submenu_page(&mut app, root_pane, true),
+        AppPage::SLIDER => render_slider_page(&mut app, root_pane, true),
+        AppPage::TOGGLE => render_toggle_page(&mut app, root_pane, true),
         AppPage::CONFIRMATION => render_confirmation_page(&mut app, root_pane),
         AppPage::CLOSE => {}
     }
