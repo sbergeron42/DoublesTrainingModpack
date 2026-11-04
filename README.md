@@ -29,22 +29,19 @@ every CPU set up on its own.
 
 ## In the match
 
-- Team colors on names, the HUD, pointers and outlines.
-- CPUs fight each other as well as the humans.
-- Teammates don't push or footstool each other.
-- **Team Attack** is on by default, as in competitive doubles. Turn it off in the modpack menu.
-- **CPU-specific difficulty levels:** a Lv. 9 Zelda and a Lv. 1 Wolf play at Lv. 9 and Lv. 1.
-- Every human uses the controller that picked them on character select.
+- **Doubles-specific mechanics** Teammates don't push or footstool each other.
+- **Team Attack** is on by default. Turn it off in the modpack menu.
+- **Persisted unique CPU difficulty levels:** a Lv. 9 Zelda and a Lv. 1 Wolf play at Lv. 9 and Lv. 1.
 
-## Per-fighter settings
+## Vanilla Training Menu Options
 
 <p align="center">
 <img src="./photos/doubles/per-player-menu.gif" width="640">
 </p>
 
-- **Training menu (`+`):** select a row and tap `L` / `R` to switch fighter.
-  - **Player Damage %** sets P1 to P4, humans included. It replaces CPU Damage % and P1 Damage %.
-  - **CPU Behavior** is set per CPU. Pick "CPU (Lv. n)" to make the CPUs fight.
+- **Vanilla training menu (`+`):** select a row and tap `L` / `R` to switch fighter.
+  - **Player Damage %** sets P1 to P4. It replaces CPU Damage % and P1 Damage % in vanilla Ultimate.
+  - **CPU Behavior** is set per CPU, with same options as vanilla: 'Stop', 'Walk', 'Lvl (n)', etc.
 - **Modpack menu** (hold `D-Pad Up` and press `B`, or hold `Start`):
   - **CPU Setup:** a profile for each CPU slot (mash, DI, ledge, tech, shield options and more).
   - **Doubles Settings:** Team Outlines and Team Attack.
@@ -79,10 +76,9 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
 # Compatibility and known limits
 
-- **Tested on Smash Ultimate 13.0.5.** The 13.0.4 addresses are included but recent features weren't tested
-  there.
-- Per-fighter CPU Behavior and damage reset to the menu's values at the start of each Training session.
-- Hitbox Visualization hides other move effects while it's on; they come back when it's off.
+- **Tested on Smash Ultimate 13.0.5.**
+- Some features haven't been tested/scaled to 4 players, like character items.
+- Experimental/doubles-native features TBD (open to feedback!)
 
 <a name="features"/>
 
