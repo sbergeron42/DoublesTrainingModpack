@@ -4,8 +4,8 @@ A fork of the [Ultimate Training Modpack](https://github.com/jugeeya/UltimateTra
 Ultimate's Training mode into a doubles lab: up to four fighters, any mix of humans and CPUs, on teams, with
 every CPU set up on its own.
 
-**[Download the latest release](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest)**
-(`libdubs_training_modpack.nro`, Smash Ultimate 13.0.5). See [Installation](#installation).
+**[Latest release](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest)**
+(`libdubs_training_modpack.nro`). See [Installation](#installation).
 
 <p align="center">
 <img src="./photos/doubles/doubles-match.gif" width="640">
@@ -22,10 +22,10 @@ every CPU set up on its own.
 <img src="./photos/doubles/team-css.jpg" width="640">
 </p>
 
-## Character select
+## Team Training CSS
 
+- `X` to toggle between Training and Team Training. Teams work like in Smash mode's Team Battle.
 - Four panels on the Training character select: P2, P3 and P4 can each be a human or a CPU.
-- `X` switches between Team Training and the usual 1v1. Teams work as in Smash mode's Team Battle.
 
 ## In the match
 
@@ -77,6 +77,7 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 # Compatibility and known limits
 
 - **Tested on Smash Ultimate 13.0.5.**
+- Not yet able to co-exist with Jugeeya's Ultimate Training Modpack. WIP.
 - Some features haven't been tested/scaled to 4 players, like character items.
 - Experimental/doubles-native features TBD (open to feedback!)
 
