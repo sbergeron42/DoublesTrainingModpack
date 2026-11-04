@@ -61,14 +61,6 @@ Each CPU uses one of eight profiles (Mash, Override and Defensive tabs).
 <img src="./photos/doubles/doubles-settings.jpg" width="640">
 </p>
 
-## CPU mixups
-
-- DI, SDI and hitstun air dodge In/Out follow the launch, whoever hit.
-- Distance mash triggers (Close / Mid / Far) measure to the nearest opponent, not P1.
-- Popo and Nana each keep their own DI pick for the whole hit.
-
-<a name="installation"/>
-
 # Installation
 
 You need [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere/releases) and
@@ -85,7 +77,7 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
 <a name="compatibility"/>
 
-# Compatibility and known limits
+# Compatiblility/Limitations
 
 - **Tested on Smash Ultimate 13.0.5.**
 - Not yet able to co-exist with Jugeeya's Ultimate Training Modpack. WIP.
