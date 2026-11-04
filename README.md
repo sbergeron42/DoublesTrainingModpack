@@ -40,12 +40,14 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
   - **Player Damage %** sets P1 to P4. It replaces CPU Damage % and P1 Damage % in vanilla Ultimate.
   - **CPU Behavior** is set per CPU, with same options as vanilla: 'Stop', 'Walk', 'Lvl (n)', etc.
 - **Modpack menu** (hold `D-Pad Up` and press `B`, or hold `Start`):
-  - **CPU Setup:** a profile for each CPU slot (mash, DI, ledge, tech, shield options and more).
+  - **CPU profiles:** each CPU uses one of eight (Mash, Override and Defensive tabs). Press Up to the title to
+    change profile, even inside a setting. `L` / `R` switch CPU (`Y` + `L` / `R` on GameCube).
   - **Doubles Settings:** Team Outlines and Team Attack.
+  - Reset is `Y` + `R` (`Z` on GameCube).
 
-| CPU Setup | Doubles Settings |
+| CPU profiles | Doubles Settings |
 |:---:|:---:|
-| <img src="./photos/doubles/cpu-setup.jpg" width="420"> | <img src="./photos/doubles/doubles-settings.jpg" width="420"> |
+| <img src="./photos/doubles/cpu-profiles.jpg" width="420"> | <img src="./photos/doubles/doubles-settings.jpg" width="420"> |
 
 ## CPU mixups
 
@@ -85,11 +87,8 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 Everything from the Ultimate Training Modpack is included. Its
 [README](https://github.com/jugeeya/UltimateTrainingModpack#readme) has screenshots, every option and the FAQ.
 
-- **Mash and follow-up options**, with triggers (hitstun, shieldstun, tumble, landing, ledge, distance and more),
-  aerial delay, full hop, fast fall, OoS offset and reaction time. In this fork they're set per CPU, in CPU
-  Setup.
-- **Defensive options:** DI, SDI, air dodge direction, clatter, ledge options and delay, tech and mistech,
-  shield (infinite, hold, constant) and shield tilt.
+- **Mash, follow-up and defensive options** (set per CPU here): triggers, aerial delay, fast fall, DI, SDI,
+  air dodge, ledge, tech, shield and more.
 - **Save states** (default `ZL` + `D-Pad Down` to save, `ZL` + `D-Pad Up` to load):
   - five slots, mirroring and randomized damage;
   - charge levels, buffs and character items.
