@@ -65,7 +65,7 @@ You need [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere/releases) and
    - `libdubs_training_modpack.nro` ([releases](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest));
    - `libnro_hook.nro` ([nro-hook-plugin](https://github.com/ultimate-research/nro-hook-plugin/releases));
    - `libparam_hook.nro` ([params-hook-plugin](https://github.com/ultimate-research/params-hook-plugin/releases)).
-3. **Remove `libtraining_modpack.nro`.** This mod replaces it; running both isn't supported.
+3. **Remove `libtraining_modpack.nro` if installed.** Running both isn't yet supported.
 
 Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
