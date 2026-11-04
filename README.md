@@ -12,8 +12,7 @@ split them into teams, and give every CPU its own settings.
 </p>
 
 <p align="center"><i>A 2v2 in Training. Red: Captain Falcon (P1, human) and Zelda (CPU, Lv. 9). Blue: Donkey Kong
-(P2, human) and Wolf (CPU, Lv. 1). By the end of the clip Zelda is still at 0%, while Wolf is at 39% and Donkey
-Kong at 61%.</i></p>
+(P2, human) and Wolf (CPU, Lv. 1).</i></p>
 
 - [Doubles features](#doubles-features)
 - [Installation](#installation)
