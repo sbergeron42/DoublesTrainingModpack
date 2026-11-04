@@ -39,15 +39,27 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 - **Vanilla training menu (`+`):** select a row and tap `L` / `R` to switch fighter.
   - **Player Damage %** sets P1 to P4. It replaces CPU Damage % and P1 Damage % in vanilla Ultimate.
   - **CPU Behavior** is set per CPU, with same options as vanilla: 'Stop', 'Walk', 'Lvl (n)', etc.
-- **Modpack menu** (hold `D-Pad Up` and press `B`, or hold `Start`):
-  - **CPU profiles:** each CPU uses one of eight (Mash, Override and Defensive tabs). Press Up to the title to
-    change profile, even inside a setting. `L` / `R` switch CPU (`Y` + `L` / `R` on GameCube).
-  - **Doubles Settings:** Team Outlines and Team Attack.
-  - Reset is `Y` + `R` (`Z` on GameCube).
 
-| CPU profiles | Doubles Settings |
-|:---:|:---:|
-| <img src="./photos/doubles/cpu-profiles.jpg" width="420"> | <img src="./photos/doubles/doubles-settings.jpg" width="420"> |
+## Modpack Menu Options
+
+Hold `D-Pad Up` and press `B`, or hold `Start`. Reset is `Y` + `R` (`Z` on GameCube).
+
+### CPU Profiles
+
+<p align="center">
+<img src="./photos/doubles/cpu-profiles.jpg" width="640">
+</p>
+
+<p align="center"><i>Up to the title, then Left / Right to change profile, even inside a setting.
+<code>L</code> / <code>R</code> switch CPU (<code>Y</code> + <code>L</code> / <code>R</code> on GameCube).</i></p>
+
+Each CPU uses one of eight profiles (Mash, Override and Defensive tabs).
+
+### Doubles Settings
+
+<p align="center">
+<img src="./photos/doubles/doubles-settings.jpg" width="640">
+</p>
 
 ## CPU mixups
 
