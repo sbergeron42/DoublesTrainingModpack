@@ -97,7 +97,7 @@ Everything from the Ultimate Training Modpack is included. Its
 
 <a name="build"/>
 
-# Build from source
+# Build
 
 Needs nightly Rust (see `rust-toolchain.toml`) and [cargo-skyline](https://github.com/jam1garner/cargo-skyline).
 
@@ -107,8 +107,7 @@ cargo skyline build --release
 
 - **Output:** `target/aarch64-skyline-switch/release/libdubs_training_modpack.nro`.
 - **`doubles_debug_log`:** writes a log to `sd:/ultimate/TrainingModpack/doubles_debug.log`.
-- **`doubles_ui_diagnostics`:** adds UI pane probes and also turns on the log. Keep it off in emulators, where
-  it can stall.
+- **`doubles_ui_diagnostics`:** adds UI pane probes and also turns on the log. Can stall in emulators.
 
 <a name="credits"/>
 
