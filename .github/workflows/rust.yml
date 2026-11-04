@@ -65,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugin
-          path: target/aarch64-skyline-switch/release/libtraining_modpack.nro
+          path: target/aarch64-skyline-switch/release/libdubs_training_modpack.nro
   plugin_outside_training_mode:
     name: Plugin NRO (Outside Training Mode)
     if: github.ref == 'refs/heads/main'
@@ -90,103 +90,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugin_outside_training_mode
-          path: target/aarch64-skyline-switch/release/libtraining_modpack.nro
-  upload:
-    name: Upload Beta Release
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs:
-      - plugin
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: atmosphere/contents/01006A800016E000/romfs/skyline/plugins 
-          merge-multiple: true
-      - name: Prepare zip
-        id: prepare_zip
-        env:
-          SMASH_PLUGIN_DIR: atmosphere/contents/01006A800016E000/romfs/skyline/plugins
-        run: |
-          curl \
-            --location \
-            --no-progress-meter \
-            --create-dirs \
-            --output-dir ${{env.SMASH_PLUGIN_DIR}} \
-            --remote-name-all \
-            https://github.com/ultimate-research/params-hook-plugin/releases/download/v13.0.4/libparam_hook.nro \
-            https://github.com/ultimate-research/nro-hook-plugin/releases/download/v0.4.0/libnro_hook.nro
-          zip -r training_modpack_beta.zip atmosphere
-      - name: Delete Release
-        uses: dev-drprasad/delete-tag-and-release@v0.2.1
-        with:
-          tag_name: beta 
-          delete_release: true 
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Update Release
-        uses: meeDamian/github-release@2.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          prerelease: true
-          allow_override: true
-          gzip: false
-          tag: beta
-          commitish: main
-          name: beta
-          body: >
-            Beta built off of the latest code in the repository. 
-            
-            # Changelog
-            
-            You can find the changelog here: https://github.com/jugeeya/UltimateTrainingModpack#beta-changelog
-            
-
-            ## Installation
-            
-            *For fuller instructions, please join the [Discord](https://discord.gg/xUZWJ5BWe7) and visit the #setup-and-download channel.*
-
-            The Training Modpack requires the following prerequisite packages:
-
-            * Skyline: https://github.com/skyline-dev/skyline/releases
-              
-              * This is a generic code mod loader for Nintendo Switch games that the Training Modpack uses.
-
-            To install the Training Modpack, download the .zip file from the [latest release page](https://github.com/jugeeya/UltimateTrainingModpack/releases/latest). Extract the files from the .zip file using the file explorer on Windows or Mac, or a program such as 7-zip (windows) or unzip (Linux). 
-
-            ### Installation on Nintendo Switch
-
-            * Atmosphere: https://github.com/Atmosphere-NX/Atmosphere/releases
-            
-              * This is the custom firmware that is required for any hacked Switch. One great guide for installation here can be found at https://switch.homebrew.guide/.
-
-            1) Transfer the extracted contents of the TrainingModpack .zip (`atmosphere` folder) onto the root of your SD card, merging the `/atmosphere` folder with the one on your SD card. 
-            
-            2) Similarly, transfer the extracted contents of the Skyline .zip (`exefs` folder) into `sd:/atmosphere/contents/01006A800016E000`.
-            
-            3) No files need to be manually deleted when upgrading from a previous version. 
-            
-            4) The The SD card should have the below files at these locations.
-
-            ```
-            SD Card Root
-            └── atmosphere/
-                └── contents/
-                    └── 01006A800016E000/
-                        ├── exefs/
-                        │   ├── subsdk9 
-                        │   └── main.npdm
-                        └── romfs/
-                            └── skyline/
-                                └── plugins/
-                                    ├── libnro_hook.nro
-                                    ├── libparam_hook.nro
-                                    └── libtraining_modpack.nro
-            ```
-          files: >
-            training_modpack_beta.zip
-      - name: Upload zip as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: full_build
-          path: training_modpack_beta.zip 
+          path: target/aarch64-skyline-switch/release/libdubs_training_modpack.nro
