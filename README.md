@@ -26,7 +26,7 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 
 ## In the match
 
-- **Doubles-specific mechanics** Teammates don't push or footstool each other.
+- **Doubles-specific mechanics:** Teammates don't push or footstool each other.
 - **Team Attack** is on by default. Turn it off in the modpack menu.
 - **Persisted unique CPU difficulty levels:** a Lv. 9 Zelda and a Lv. 1 Wolf play at Lv. 9 and Lv. 1.
 
