@@ -24,7 +24,11 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 
 <p align="center"><i>`X` to toggle between Training and Team Training. UI works like in Smash mode's Team Battle.</i></p>
 
-## In-game
+## Doubles Settings and Mechanics
+
+<p align="center">
+<img src="./photos/doubles/doubles-settings.jpg" width="640">
+</p>
 
 - **Doubles-specific mechanics:** Teammates don't push or footstool each other.
 - **Team Attack** is on by default. Turn it off in the modpack menu.
@@ -50,12 +54,6 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 <code>L</code> / <code>R</code> switch CPU (<code>Y</code> + <code>L</code> / <code>R</code> on GameCube).</i></p>
 
 Each CPU uses one of eight profiles (Mash, Override and Defensive tabs).
-
-## Doubles Settings
-
-<p align="center">
-<img src="./photos/doubles/doubles-settings.jpg" width="640">
-</p>
 
 # Installation
 
