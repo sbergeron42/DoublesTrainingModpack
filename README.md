@@ -91,13 +91,6 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
 <a name="compatibility"/>
 
-# Compatibility/Limitations
-
-- **Tested on patch 13.0.5.**
-- Incompatible with Jugeeya's Ultimate Training Modpack. (WIP)
-- Some features haven't been tested/scaled to 4 players, like character items.
-- Experimental/doubles-native features TBD, e.g. solo dubs practice (open to feedback!)
-
 <a name="build"/>
 
 # Build
@@ -112,4 +105,9 @@ cargo skyline build --release
 - **`doubles_debug_log`:** writes a log to `sd:/ultimate/TrainingModpack/doubles_debug.log`.
 - **`doubles_ui_diagnostics`:** adds UI pane probes and also turns on the log. Can stall in emulators.
 
-<a name="credits"/>
+# Compatibility/Limitations
+
+- **Tested on patch 13.0.5.**
+- Incompatible with Jugeeya's Ultimate Training Modpack. (WIP)
+- Some features haven't been tested/scaled to 4 players, like character items.
+- Experimental/doubles-native features TBD, e.g. solo dubs practice (open to feedback!)
