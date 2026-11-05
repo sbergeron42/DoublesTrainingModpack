@@ -10,7 +10,7 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 <img src="./photos/doubles/doubles-match.gif" width="640">
 </p>
 
-<p align="center"><i>Practice and lab dubs combos/setups with a buddy!</i></p>
+<p align="center"><i>Practice and lab sick dubs combos/setups with a buddy!</i></p>
 
 <a name="doubles-features"/>
 
