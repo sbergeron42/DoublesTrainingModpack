@@ -3,8 +3,7 @@
 A fork of the [Ultimate Training Modpack](https://github.com/jugeeya/UltimateTrainingModpack) that turns Smash
 Ultimate's Training mode into a doubles lab: up to four fighters, any mix of humans and up to 3 CPUs.
 
-**[Latest release](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest)**
-(`libdubs_training_modpack.nro`). See [Installation](#installation).
+Download the **[Latest release](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest)**
 
 <p align="center">
 <img src="./photos/doubles/doubles-match.gif" width="640">
@@ -74,20 +73,6 @@ Everything from the Ultimate Training Modpack is included. Refer to their
 Credit to jugeeya and
 [its contributors](https://github.com/jugeeya/UltimateTrainingModpack/graphs/contributors), who made the menus,
 save states and CPU options this mod builds on.
-
-# Installation
-
-You need [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere/releases) and
-[Skyline](https://github.com/skyline-dev/skyline/releases), as for the regular Training Modpack.
-
-1. Put Skyline's `exefs` folder in `sd:/atmosphere/contents/01006A800016E000/`.
-2. Put these in `sd:/atmosphere/contents/01006A800016E000/romfs/skyline/plugins/`:
-   - `libdubs_training_modpack.nro` ([releases](https://github.com/sbergeron42/DoublesTrainingModpack/releases/latest));
-   - `libnro_hook.nro` ([nro-hook-plugin](https://github.com/ultimate-research/nro-hook-plugin/releases));
-   - `libparam_hook.nro` ([params-hook-plugin](https://github.com/ultimate-research/params-hook-plugin/releases)).
-3. **Remove `libtraining_modpack.nro` if installed.** Running both isn't yet supported.
-
-Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
 <a name="compatibility"/>
 
