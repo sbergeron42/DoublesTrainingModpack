@@ -90,10 +90,10 @@ Settings are saved to `sd:/ultimate/TrainingModpack/training_modpack_dubs.conf`.
 
 # Compatibility/Limitations
 
-- **Tested on Smash Ultimate 13.0.5.**
-- Not yet able to co-exist with Jugeeya's Ultimate Training Modpack. WIP.
+- **Tested on patch 13.0.5.**
+- Not yet co-existent with Jugeeya's Ultimate Training Modpack. (WIP)
 - Some features haven't been tested/scaled to 4 players, like character items.
-- Experimental/doubles-native features TBD (open to feedback!)
+- Experimental/doubles-native features TBD, e.g. solo dubs practice (open to feedback!)
 
 <a name="build"/>
 
