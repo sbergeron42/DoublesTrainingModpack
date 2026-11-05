@@ -41,7 +41,7 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 
 - **Select a row and tap `L` / `R` to switch Player.**
   - **Player Damage %** sets P1 to P4. It replaces CPU Damage % and P1 Damage % in vanilla Ultimate.
-  - **CPU Behavior** is set per CPU, with same options as vanilla: 'Stop', 'Walk', 'Lvl (n)', etc.
+  - **CPU Behavior** sets per CPU: 'Stop', 'Walk', 'Lvl (n)', etc.
 
 ## CPU Profiles
 
