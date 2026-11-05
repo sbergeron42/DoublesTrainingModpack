@@ -16,7 +16,7 @@ Download the **[latest release here](https://github.com/sbergeron42/DoublesTrain
 
 <a name="doubles-features"/>
 
-# Doubles features
+#  Features
 
 ## Team Training CSS
 <p align="center">
@@ -58,7 +58,7 @@ Ability to set unique behavior for each CPU and in an easy way. Up to 8 profiles
 
 <a name="features"/>
 
-# Training Modpack features
+## Everything else from Ultimate Training Modpack
 
 Everything from the Ultimate Training Modpack is included. Refer to their
 [README](https://github.com/jugeeya/UltimateTrainingModpack#readme) for more info.
