@@ -35,7 +35,7 @@ Download the **[latest release here](https://github.com/sbergeron42/DoublesTrain
 - **Team Attack** and **Team Outlines** are on by default and can be turned off in the modpack menu.
 - **Persisted CPU difficulties:** a Lv. 9 Zelda and a Lv. 1 Wolf play at Lv. 9 and Lv. 1.
 
-## Vanilla Training Menu Options
+## Enhanced Vanilla Training Menu
 
 <p align="center">
 <img src="./photos/doubles/per-player-menu.gif" width="640">
