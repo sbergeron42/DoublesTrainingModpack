@@ -25,7 +25,7 @@ Download the **[latest release here](https://github.com/sbergeron42/DoublesTrain
 
 <p align="center"><i>`X` to toggle between Training and Team Training. UI works like in Smash mode's Team Battle.</i></p>
 
-## Settings and Mechanics
+## Dubs Settings and Mechanics
 
 <p align="center">
 <img src="./photos/doubles/doubles-settings.jpg" width="640">
