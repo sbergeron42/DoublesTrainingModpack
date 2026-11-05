@@ -71,6 +71,10 @@ Everything from the Ultimate Training Modpack is included. Refer to their
 - **Menu use:** when several options are picked, one is chosen at random. `X` saves the current settings as your
   defaults.
 
+Credit to jugeeya and
+[its contributors](https://github.com/jugeeya/UltimateTrainingModpack/graphs/contributors), who made the menus,
+save states and CPU options this mod builds on.
+
 # Installation
 
 You need [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere/releases) and
