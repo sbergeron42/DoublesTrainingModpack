@@ -61,7 +61,7 @@ Ability to set unique behavior for each CPU and in an easy way. Up to 8 profiles
 Everything from the Ultimate Training Modpack is included. Its
 [README](https://github.com/jugeeya/UltimateTrainingModpack#readme) has screenshots, every option and the FAQ.
 
-- **Mash, follow-up and defensive options** (set per CPU here): triggers, aerial delay, fast fall, DI, SDI,
+- **Mash, follow-up and defensive options**: triggers, aerial delay, fast fall, DI, SDI,
   air dodge, ledge, tech, shield and more.
 - **Save states** (default `ZL` + `D-Pad Down` to save, `ZL` + `D-Pad Up` to load):
   - five slots, mirroring and randomized damage;
