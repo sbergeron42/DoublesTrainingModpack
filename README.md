@@ -39,7 +39,7 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 <img src="./photos/doubles/per-player-menu.gif" width="640">
 </p>
 
-- **Vanilla training menu (`+`):** select a row and tap `L` / `R` to switch fighter.
+- **Select a row and tap `L` / `R` to switch fighter.**
   - **Player Damage %** sets P1 to P4. It replaces CPU Damage % and P1 Damage % in vanilla Ultimate.
   - **CPU Behavior** is set per CPU, with same options as vanilla: 'Stop', 'Walk', 'Lvl (n)', etc.
 
