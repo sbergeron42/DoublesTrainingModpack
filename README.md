@@ -113,9 +113,3 @@ cargo skyline build --release
 - **`doubles_ui_diagnostics`:** adds UI pane probes and also turns on the log. Can stall in emulators.
 
 <a name="credits"/>
-
-# Credits
-
-Built on the [Ultimate Training Modpack](https://github.com/jugeeya/UltimateTrainingModpack) by jugeeya and
-[its contributors](https://github.com/jugeeya/UltimateTrainingModpack/graphs/contributors), who made the menus,
-save states and CPU options this mod builds on.
