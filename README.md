@@ -52,7 +52,7 @@ Ultimate's Training mode into a doubles lab: up to four fighters, any mix of hum
 <p align="center"><i>Up to the title, then Left / Right to change profile.
 <code>L</code> / <code>R</code> switch CPU (<code>Y</code> + <code>L</code> / <code>R</code> on GameCube).</i></p>
 
-Ability to set unique behavior for each CPU, up to eight profiles available.
+Ability to set unique behavior for each CPU and in an easy way. Up to 8 profiles are available.
 
 <a name="features"/>
 
