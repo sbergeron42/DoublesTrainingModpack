@@ -34,7 +34,7 @@ Download the **[latest release here](https://github.com/sbergeron42/DoublesTrain
 - **Team Attack** and **Team Outlines** are on by default and can be turned off in the modpack menu.
 - **Persisted CPU difficulties:** a Lv. 9 Zelda and a Lv. 1 Wolf play at Lv. 9 and Lv. 1.
 
-## Enhanced Vanilla Training Menu
+## Vanilla Menu Enhancements
 
 <p align="center">
 <img src="./photos/doubles/per-player-menu.gif" width="640">
@@ -86,9 +86,9 @@ cargo skyline build --release
 - **`doubles_debug_log`:** writes a log to `sd:/ultimate/TrainingModpack/doubles_debug.log`.
 - **`doubles_ui_diagnostics`:** adds UI pane probes and also turns on the log. Can stall in emulators.
 
-# Compatibility/Limitations
+# Compatibility + WIP
 
 - **Tested on patch 13.0.5.**
-- Incompatible with Jugeeya's Ultimate Training Modpack. (WIP)
+- Fully compatible with Ultimate Training Modpack.
 - Some features haven't been tested/scaled to 4 players, like character items.
 - Experimental/doubles-native features TBD, e.g. solo dubs practice (open to feedback!)
